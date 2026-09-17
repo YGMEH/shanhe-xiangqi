@@ -11,17 +11,17 @@ export function createBoardVisuals(materials) {
   const group = new THREE.Group();
   group.name = "board-visuals";
   const lineMaterial = new THREE.MeshBasicMaterial({
-    color: 0xc7a86a,
+    color: 0x8d7648,
     transparent: true,
-    opacity: 0.72,
+    opacity: 0.5,
     depthWrite: false,
     side: THREE.DoubleSide,
     toneMapped: false,
   });
   const secondaryLineMaterial = new THREE.MeshBasicMaterial({
-    color: 0xb8a274,
+    color: 0x7d6a45,
     transparent: true,
-    opacity: 0.44,
+    opacity: 0.34,
     depthWrite: false,
     side: THREE.DoubleSide,
     toneMapped: false,
@@ -86,9 +86,9 @@ export function createBoardVisuals(materials) {
   const nodeGeometry = new THREE.RingGeometry(0.055, 0.095, 16);
   nodeGeometry.rotateX(-Math.PI / 2);
   const nodeMaterial = new THREE.MeshBasicMaterial({
-    color: 0xd8bd85,
+    color: 0xa08a58,
     transparent: true,
-    opacity: 0.42,
+    opacity: 0.3,
     depthWrite: false,
     side: THREE.DoubleSide,
     toneMapped: false,

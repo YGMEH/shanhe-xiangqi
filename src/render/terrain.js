@@ -7,8 +7,8 @@ export const TERRAIN_SIZE = Object.freeze({
 });
 
 export const BOARD_SPACING = Object.freeze({
-  x: 2.16,
-  y: 1.86,
+  x: 1.98,
+  y: 1.7,
 });
 
 export function boardPosition(x, y) {
@@ -96,16 +96,16 @@ export function terrainHeightAt(x, z) {
     (fbm(x * 0.26 + 2.1, z * 0.26 - 1.3) - 0.5) * 1.25 +
     (fbm(x * 0.72 - 3.2, z * 0.72 + 1.8) - 0.5) * 0.28;
   const plateau = 0.1 + boardFalloff * 0.2 + rolling * (0.22 + (1 - boardFalloff) * 0.9);
-  const riverCore = 1 - smoothstep(0.25, 1.0, Math.abs(z));
-  const riverBank = 1 - smoothstep(1.15, 2.1, Math.abs(z));
-  const channel = riverCore * 0.62 + riverBank * 0.14;
+  const riverCore = 1 - smoothstep(0.35, 1.35, Math.abs(z));
+  const riverBank = 1 - smoothstep(1.5, 2.7, Math.abs(z));
+  const channel = riverCore * 0.78 + riverBank * 0.16;
 
   const rawBridgeBlend = BRIDGE_COLUMNS.reduce((closest, column) => {
     const bridgeX = (column - (BOARD_COLUMNS - 1) / 2) * BOARD_SPACING.x;
     return Math.min(closest, smoothstep(0.35, 1.22, Math.abs(x - bridgeX)));
   }, 1);
   const bridgeBlend = 1 - rawBridgeBlend;
-  const bridgeDeck = 0.16 + smoothstep(0.2, 0.8, Math.abs(z)) * 0.02;
+  const bridgeDeck = 0.26 + smoothstep(0.2, 0.85, Math.abs(z)) * 0.04;
   const height = THREE.MathUtils.lerp(plateau - channel, bridgeDeck, bridgeBlend);
   return height;
 }
@@ -163,7 +163,7 @@ export function createTerrain(materials, quality = "high") {
 
   const material = materials.ground.clone();
   material.vertexColors = true;
-  material.color = new THREE.Color(0x9c8a66);
+  material.color = new THREE.Color(0xb09a72);
 
   const terrain = new THREE.Mesh(geometry, material);
   terrain.receiveShadow = true;
@@ -173,7 +173,7 @@ export function createTerrain(materials, quality = "high") {
 }
 
 export function createRiver(materials) {
-  const waterGeometry = new THREE.PlaneGeometry(24.8, 3.05, 220, 30);
+  const waterGeometry = new THREE.PlaneGeometry(26.4, 4.3, 240, 38);
   waterGeometry.rotateX(-Math.PI / 2);
 
   const water = new THREE.MeshPhysicalMaterial({
@@ -196,7 +196,7 @@ export function createRiver(materials) {
   mesh.userData.basePositions = Float32Array.from(waterGeometry.attributes.position.array);
 
   const bed = new THREE.Mesh(
-    new THREE.PlaneGeometry(25.4, 3.3, 1, 1),
+    new THREE.PlaneGeometry(27.0, 4.7, 1, 1),
     materials.stoneDark
   );
   bed.rotation.x = -Math.PI / 2;
@@ -318,8 +318,8 @@ export function createBridges(materials) {
     bridge.position.set(x, 0.02, 0);
 
     // Deck slabs laid over a gentle arch instead of one flat box.
-    const deckSegments = 14;
-    const bridgeSpan = 4.35;
+    const deckSegments = 17;
+    const bridgeSpan = 5.9;
     for (let i = 0; i < deckSegments; i += 1) {
       const t = i / (deckSegments - 1);
       const z = (t - 0.5) * bridgeSpan;
@@ -342,8 +342,8 @@ export function createBridges(materials) {
         side < 0 ? materials.stoneDark : materials.stone
       );
       arch.rotation.set(Math.PI / 2, 0, Math.PI);
-      arch.position.set(side * (bridgeWidth * 0.5 - 0.16), -0.22, 0);
-      arch.scale.set(1.12, 0.7, 1);
+      arch.position.set(side * (bridgeWidth * 0.5 - 0.16), -0.3, 0);
+      arch.scale.set(1.12, 0.9, 1);
       arch.castShadow = true;
       bridge.add(arch);
     });
@@ -372,7 +372,7 @@ export function createBridges(materials) {
           new THREE.BoxGeometry(0.19, 0.72, 0.19, 1, 1, 1),
           materials.stone
         );
-        post.position.set(side * (bridgeWidth * 0.5 + 0.03), 0.4, i * 0.94);
+        post.position.set(side * (bridgeWidth * 0.5 + 0.03), 0.4, i * 1.28);
         post.castShadow = true;
         bridge.add(post);
 
@@ -380,7 +380,7 @@ export function createBridges(materials) {
           new THREE.SphereGeometry(0.12, 10, 7),
           materials.stoneDark
         );
-        cap.position.set(side * (bridgeWidth * 0.5 + 0.03), 0.79, i * 0.94);
+        cap.position.set(side * (bridgeWidth * 0.5 + 0.03), 0.79, i * 1.28);
         cap.scale.set(1, 0.7, 1);
         cap.castShadow = true;
         bridge.add(cap);
@@ -522,8 +522,8 @@ export function createGroundSkirt(materials) {
     );
     position.setY(i, THREE.MathUtils.lerp(terrainY - 0.02, -1.9, blend));
     const variation = fbm(x * 0.5 + 4, z * 0.5 - 2);
-    const shade = 0.46 + variation * 0.16;
-    colors.push(shade * 1.24, shade * 1.0, shade * 0.68);
+    const shade = 0.56 + variation * 0.15;
+    colors.push(shade * 1.02, shade * 0.9, shade * 0.7);
   }
   geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
   geometry.computeVertexNormals();
@@ -535,7 +535,7 @@ export function createGroundSkirt(materials) {
   skirt.material.vertexColors = true;
   skirt.receiveShadow = true;
   skirt.name = "ground-skirt";
-  skirt.material.color = new THREE.Color(0x9c8a66);
+  skirt.material.color = new THREE.Color(0xb09a72);
   skirt.material.roughness = 1;
   return skirt;
 }
