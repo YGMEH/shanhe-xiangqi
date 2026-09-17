@@ -372,7 +372,7 @@ export function createBridges(materials) {
           new THREE.BoxGeometry(0.19, 0.72, 0.19, 1, 1, 1),
           materials.stone
         );
-        post.position.set(side * (bridgeWidth * 0.5 + 0.03), 0.4, i * 1.28);
+        post.position.set(side * (bridgeWidth * 0.5 + 0.03), 0.4, i * 1.32);
         post.castShadow = true;
         bridge.add(post);
 
@@ -431,7 +431,7 @@ export function createDistantRidges(materials, quality = "high") {
 
   const layers = [
     {
-      color: 0x60736c,
+      color: 0x4c5d59,
       count: quality === "high" ? 26 : 14,
       radius: 43,
       height: 7.2,
@@ -440,7 +440,7 @@ export function createDistantRidges(materials, quality = "high") {
       depth: 1.9,
     },
     {
-      color: 0x718079,
+      color: 0x5a6a64,
       count: quality === "high" ? 22 : 12,
       radius: 37,
       height: 5.2,

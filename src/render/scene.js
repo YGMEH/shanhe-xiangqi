@@ -295,6 +295,16 @@ export class GameScene {
       }
     });
     scene.rotation.y = Math.PI;
+    const scaleByType = {
+      [PIECE_TYPES.SOLDIER]: 1.08,
+      [PIECE_TYPES.GENERAL]: 1.12,
+      [PIECE_TYPES.ADVISOR]: 1.1,
+      [PIECE_TYPES.ELEPHANT]: 1.02,
+      [PIECE_TYPES.HORSE]: 1.05,
+      [PIECE_TYPES.CHARIOT]: 1.0,
+      [PIECE_TYPES.CANNON]: 1.04,
+    };
+    scene.scale.setScalar(scaleByType[piece.type] ?? 1.05);
     actor.group.add(scene);
     if (fallback) fallback.parent?.remove(fallback);
     actor.externalModel = scene;

@@ -39,7 +39,12 @@ export function createBoardVisuals(materials) {
   for (let y = 0; y < BOARD_ROWS; y += 1) {
     const points = [];
     for (let x = 0; x < BOARD_COLUMNS; x += 1) points.push(nodes[y * BOARD_COLUMNS + x]);
-    group.add(createGroundRibbon(points, 0.035, lineMaterial));
+    group.add(
+      createGroundRibbon(points, 0.035, lineMaterial, {
+        breakAtRiver: true,
+        bank: 1.6,
+      })
+    );
   }
 
   for (let x = 0; x < BOARD_COLUMNS; x += 1) {
@@ -295,16 +300,25 @@ export function nodePosition(x, y, offset = 0) {
  * segment and resampling the height keeps the board lines from floating over
  * slopes, which is what made them read as wire strung above the ground.
  */
-function createGroundRibbon(points, width, material) {
+function createGroundRibbon(points, width, material, options = {}) {
   const positions = [];
   const indices = [];
   const halfWidth = width * 0.5;
   const subdivisions = 6;
-  let vertexCount = 0;
+  let vertexOffset = 0;
 
   for (let segment = 0; segment < points.length - 1; segment += 1) {
     const start = points[segment];
     const end = points[segment + 1];
+    // Long horizontal ranks visually cross the river; split them there so the
+    // water stays continuous instead of being overwritten by a board line.
+    if (
+      options.breakAtRiver &&
+      Math.abs(start.z) < options.bank &&
+      Math.abs(end.z) < options.bank
+    ) {
+      continue;
+    }
     const direction = new THREE.Vector2(end.x - start.x, end.z - start.z);
     if (direction.lengthSq() < 1e-6) continue;
     direction.normalize();
@@ -318,19 +332,16 @@ function createGroundRibbon(points, width, material) {
       const y = terrainHeightAtBoardWorld(x, z) + 0.035;
       positions.push(x - normalX, y, z - normalZ);
       positions.push(x + normalX, y, z + normalZ);
-      vertexCount += 2;
     }
-  }
 
-  for (let segment = 0; segment < points.length - 1; segment += 1) {
-    const base = segment * (subdivisions + 1) * 2;
     for (let step = 0; step < subdivisions; step += 1) {
-      const a = base + step * 2;
+      const a = vertexOffset + step * 2;
       const b = a + 1;
       const c = a + 2;
       const d = a + 3;
       indices.push(a, b, c, b, d, c);
     }
+    vertexOffset += (subdivisions + 1) * 2;
   }
 
   const geometry = new THREE.BufferGeometry();

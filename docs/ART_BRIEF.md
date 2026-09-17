@@ -13,16 +13,20 @@
 - 注意：画面中央留出低对比区域，棋盘会覆盖在上面
 
 ### 2. 开场战役插画
-- 文件名：`public/assets/art/key-art.webp`
+- 文件名：`src/assets/art/key-art.webp`
 - 尺寸：2560×1440
 - 用途：开始界面右侧或加载页
 - 风格：山谷俯瞰，楚河贯穿，远处石桥与军旗，人物仅为剪影
 
 ### 3. 结算纹章
-- 文件名：`public/assets/art/result-seal.webp`
+- 文件名：`src/assets/art/result-seal.webp`
 - 尺寸：1024×1024，透明背景
 - 用途：胜负面板
 - 内容：朱砂与古铜质感印章，不含可读文字
+
+> 这两张图由 `src/styles.css` 引用，因此放在 `src/assets/art/` 走 Vite 资源管线：
+> 构建时会被哈希并改写为相对路径，从而在 GitHub Pages 子目录下也能正常加载。
+> 若改回以斜杠开头的根绝对资源路径，`npm run check:public` 会直接报错拦截。
 
 ## 第二优先级：材质
 

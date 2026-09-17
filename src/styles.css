@@ -610,8 +610,10 @@ select:focus-visible {
   overflow-y: auto;
   overscroll-behavior: contain;
   background:
-    linear-gradient(90deg, rgba(3, 9, 10, 0.92), rgba(3, 9, 10, 0.28) 50%, rgba(3, 9, 10, 0.92)),
-    rgba(3, 10, 11, 0.62);
+    linear-gradient(90deg, rgba(3, 9, 10, 0.94) 0%, rgba(4, 12, 12, 0.72) 38%, rgba(4, 12, 12, 0.22) 62%, rgba(3, 9, 10, 0.72) 100%),
+    linear-gradient(180deg, rgba(3, 9, 10, 0.55), rgba(3, 9, 10, 0.28) 40%, rgba(3, 9, 10, 0.86)),
+    url("./assets/art/key-art.webp") center / cover no-repeat,
+    #081213;
   opacity: 0;
   visibility: hidden;
   transition: opacity 400ms ease, visibility 400ms ease;
@@ -631,9 +633,10 @@ select:focus-visible {
   border-top: 1px solid rgba(215, 173, 93, 0.68);
   border-bottom: 1px solid rgba(215, 173, 93, 0.38);
   background:
-    linear-gradient(90deg, rgba(12, 30, 30, 0.96), rgba(8, 19, 20, 0.82) 70%, rgba(8, 19, 20, 0.45)),
-    var(--panel);
-  box-shadow: 0 34px 90px rgba(0, 0, 0, 0.42);
+    linear-gradient(90deg, rgba(7, 20, 20, 0.93), rgba(6, 16, 17, 0.78) 72%, rgba(6, 16, 17, 0.42)),
+    rgba(6, 16, 17, 0.3);
+  backdrop-filter: blur(7px) saturate(0.92);
+  box-shadow: 0 34px 90px rgba(0, 0, 0, 0.55);
   text-align: left;
   clip-path: polygon(18px 0, 100% 0, 100% calc(100% - 22px), calc(100% - 22px) 100%, 0 100%, 0 18px);
 }
@@ -1077,6 +1080,23 @@ select:focus-visible {
   color: var(--bronze);
   font-size: 10px;
   letter-spacing: 0.3em;
+}
+
+.result-panel::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: -54px;
+  width: 104px;
+  height: 104px;
+  transform: translateX(-50%);
+  background: url("./assets/art/result-seal.webp") center / contain no-repeat;
+  filter: drop-shadow(0 10px 26px rgba(0, 0, 0, 0.6));
+  pointer-events: none;
+}
+
+.result-panel {
+  padding-top: 66px;
 }
 
 .result-panel h2 {
