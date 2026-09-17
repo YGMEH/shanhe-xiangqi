@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#091416" />
+    <meta
+      name="description"
+      content="山河弈阵：在起伏战场上进行的立体中国象棋。"
+    />
+    <title>山河弈阵</title>
+  </head>
+  <body>
+    <main id="app">
+      <canvas id="battlefield" aria-label="山河弈阵三维战场"></canvas>
+      <div class="atmosphere" aria-hidden="true"></div>
+      <div id="loading-layer" class="loading-layer">
+        <div class="loading-mark">山河</div>
+        <span id="loading-label">正在铺开地形</span>
+      </div>
+
+      <header class="topbar">
+        <div class="identity">
+          <div class="seal" aria-hidden="true">弈</div>
+          <div>
+            <h1>山河弈阵</h1>
+            <p id="battle-subtitle">楚河改道 · 三桥争锋</p>
+          </div>
+        </div>
+
+        <div class="top-actions" aria-label="对局设置">
+          <button id="view-button" class="icon-button" type="button" aria-label="切换视角" title="切换视角">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3 8.5 12 3l9 5.5v7L12 21l-9-5.5z" />
+              <path d="m3 8.5 9 5.5 9-5.5M12 14v7" />
+            </svg>
+          </button>
+          <button id="sound-button" class="icon-button" type="button" aria-label="关闭声音" title="关闭声音">
+            <svg class="sound-on" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 9v6h4l5 4V5L8 9z" />
+              <path d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12" />
+            </svg>
+            <svg class="sound-off" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 9v6h4l5 4V5L8 9z" />
+              <path d="m17 9 4 4m0-4-4 4" />
+            </svg>
+          </button>
+          <button id="help-button" class="icon-button" type="button" aria-label="查看规则" title="查看规则">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="9" />
+              <path d="M9.8 9a2.3 2.3 0 1 1 3.2 2.1c-.8.4-1 1-1 1.9M12 17h.01" />
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <aside class="army-panel red-army" aria-label="蜀军状态">
+        <div class="army-heading">
+          <span class="army-mark">蜀</span>
+          <div>
+            <strong>赤壁军</strong>
+            <span id="red-strength">16 子</span>
+          </div>
+        </div>
+        <div id="red-captures" class="capture-row" aria-label="蜀军俘获"></div>
+      </aside>
+
+      <aside class="army-panel black-army" aria-label="魏军状态">
+        <div class="army-heading">
+          <span class="army-mark">魏</span>
+          <div>
+            <strong>玄甲军</strong>
+            <span id="black-strength">16 子</span>
+          </div>
+        </div>
+        <div id="black-captures" class="capture-row" aria-label="魏军俘获"></div>
+      </aside>
+
+      <div class="battle-log" aria-live="polite">
+        <span id="last-event">两军列阵，战鼓未响</span>
+      </div>
+
+      <section class="turn-strip" aria-live="polite">
+        <span id="turn-emblem" class="turn-emblem red">蜀</span>
+        <div>
+          <span id="turn-label">赤壁军行棋</span>
+          <span id="turn-hint">请选择一枚棋子</span>
+        </div>
+      </section>
+
+      <section class="command-bar" aria-label="对局操作">
+        <button id="undo-button" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M9 7 4 12l5 5" />
+            <path d="M5 12h8a6 6 0 0 1 6 6" />
+          </svg>
+          <span>悔棋</span>
+        </button>
+        <span class="command-divider"></span>
+        <button id="restart-button" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M20 7v5h-5" />
+            <path d="M19 12a7 7 0 1 0-2 5" />
+          </svg>
+          <span>重开</span>
+        </button>
+        <span class="command-divider"></span>
+        <button id="mode-button" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="8" cy="9" r="3" />
+            <circle cx="17" cy="9" r="3" />
+            <path d="M3 20c.5-3.3 2.2-5 5-5s4.5 1.7 5 5M13.5 19.5c.4-2.5 1.6-4 3.5-4s3.1 1.5 3.5 4" />
+          </svg>
+          <span id="mode-label">人机对弈</span>
+        </button>
+      </section>
+
+      <div class="camera-tools" aria-label="镜头控制">
+        <button id="camera-zoom-in" class="icon-button" type="button" aria-label="拉近镜头" title="拉近镜头">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="11" cy="11" r="7" />
+            <path d="M20 20l-3.6-3.6M11 8.5v5M8.5 11h5" />
+          </svg>
+        </button>
+        <button id="camera-zoom-out" class="icon-button" type="button" aria-label="拉远镜头" title="拉远镜头">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="11" cy="11" r="7" />
+            <path d="M20 20l-3.6-3.6M8.5 11h5" />
+          </svg>
+        </button>
+        <button id="camera-rotate-left" class="icon-button" type="button" aria-label="向左环绕" title="向左环绕">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M20 12a8 8 0 1 1-2.6-5.9" />
+            <path d="M20 4v4h-4" />
+          </svg>
+        </button>
+        <button id="camera-rotate-right" class="icon-button" type="button" aria-label="向右环绕" title="向右环绕">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 12a8 8 0 1 0 2.6-5.9" />
+            <path d="M4 4v4h4" />
+          </svg>
+        </button>
+        <button id="camera-reset" class="icon-button" type="button" aria-label="复位镜头" title="复位镜头">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 5h16v14H4z" />
+            <path d="M9 5v14" />
+          </svg>
+        </button>
+      </div>
+
+      <section id="inspector" class="inspector" aria-live="polite">
+        <span id="inspector-glyph" class="inspector-glyph">帅</span>
+        <div>
+          <strong id="inspector-name">选择棋子</strong>
+          <span id="inspector-detail">战场待命</span>
+        </div>
+      </section>
+
+      <div id="move-history" class="move-history" aria-label="行棋记录"></div>
+      <div id="toast" class="toast" aria-live="assertive"></div>
+
+      <section id="start-screen" class="modal-layer is-visible">
+        <div class="start-card">
+          <div class="camp-seal" aria-hidden="true">山河</div>
+          <p class="start-kicker">九列十行 · 山河为局</p>
+          <h2>楚河改道，三桥争锋</h2>
+          <p class="start-copy">
+            骑兵沿山脊冲锋，战车借石桥渡河，火炮需要炮架才能越阵轰击。
+            守住九宫，夺取敌将。
+          </p>
+          <div class="start-options">
+            <label>
+              <span>执子阵营</span>
+              <select id="side-select">
+                <option value="red">蜀军 · 赤色</option>
+                <option value="black">魏军 · 玄色</option>
+              </select>
+            </label>
+            <label>
+              <span>对手棋力</span>
+              <select id="difficulty-select">
+                <option value="1">演武</option>
+                <option value="2" selected>鏖战</option>
+                <option value="3">奇谋</option>
+              </select>
+            </label>
+            <label>
+              <span>画面品质</span>
+              <select id="quality-select">
+                <option value="auto" selected>自动适配</option>
+                <option value="high">精细渲染</option>
+                <option value="balanced">性能优先</option>
+              </select>
+            </label>
+          </div>
+          <div class="start-modes" role="group" aria-label="对局模式">
+            <button id="quick-match-button" class="mode-card is-active" type="button">
+              <span>自由对弈</span>
+              <small>标准规则 · 可选阵营与棋力</small>
+            </button>
+            <button id="campaign-button" class="mode-card" type="button">
+              <span>山河战役</span>
+              <small>八关主线 · 目标与三星评价</small>
+            </button>
+          </div>
+          <button id="start-button" class="primary-button" type="button">展开对局</button>
+          <button id="continue-button" class="quiet-button continue-button" type="button" hidden>
+            继续上局
+          </button>
+          <p class="start-tip">拖动旋转 · 滚轮缩放 · 右键平移 · 双击聚焦 · 点击行棋</p>
+        </div>
+      </section>
+
+      <section id="campaign-panel" class="campaign-panel" aria-labelledby="campaign-title" aria-hidden="true">
+        <div class="campaign-heading">
+          <div>
+            <span>战役卷宗</span>
+            <h2 id="campaign-title">山河战役</h2>
+          </div>
+          <button id="close-campaign" class="close-button" type="button" aria-label="关闭战役">×</button>
+        </div>
+        <div id="campaign-chapters" class="campaign-chapters"></div>
+      </section>
+
+      <section id="help-panel" class="drawer" aria-labelledby="help-title" aria-hidden="true">
+        <div class="drawer-heading">
+          <div>
+            <span>战场军令</span>
+            <h2 id="help-title">规则与地势</h2>
+          </div>
+          <button id="close-help" class="close-button" type="button" aria-label="关闭规则">×</button>
+        </div>
+        <div class="rule-list">
+          <article>
+            <strong>三桥渡河</strong>
+            <p>任何棋子纵向跨越河界，都必须位于最左、中央或最右石桥列。士、象与将仍受九宫和本方半场限制。</p>
+          </article>
+          <article>
+            <strong>炮击阵位</strong>
+            <p>火炮正常移动不翻山；吃子时必须与目标之间恰有一枚“炮架”。开火会显示炮弹飞行轨迹。</p>
+          </article>
+          <article>
+            <strong>兵卒登岸</strong>
+            <p>兵卒过河后可横走，不能后退。过河兵在判定中价值更高。</p>
+          </article>
+          <article>
+            <strong>胜负</strong>
+            <p>将死一方落败，被将军的将帅会出现警示。无合法着法时也会结束对局。</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="result-panel" class="result-panel" aria-hidden="true">
+        <div class="result-ribbon" id="result-ribbon">战局已定</div>
+        <h2 id="result-title">赤壁军胜</h2>
+        <p id="result-copy">敌将已无路可退。</p>
+        <div id="result-stars" class="result-stars" aria-label="关卡评价"></div>
+        <div class="result-actions">
+          <button id="result-restart" class="primary-button" type="button">再战一局</button>
+          <button id="result-close" class="quiet-button" type="button">查看战场</button>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
