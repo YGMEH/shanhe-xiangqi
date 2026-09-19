@@ -1,6 +1,5 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import {
   BOARD_COLUMNS,
   BOARD_ROWS,
@@ -59,12 +58,19 @@ export class GameScene {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.12;
 
+    // 环境贴图(IBL): 决定金属/盔甲/水面的环境反射。
+    // 原来默认用 three.js 自带的 RoomEnvironment(室内影棚), 金属会显得很"假",
+    // 也不符合"黄昏沙场"的题材。现在默认就用程序化生成的黄昏战场天空,
+    // 如果日后往 assets/env/ 放了真 HDRI, 会自动覆盖成它。
     const pmrem = new THREE.PMREMGenerator(this.renderer);
     pmrem.compileEquirectangularShader();
-    this.environmentMap = pmrem.fromScene(new RoomEnvironment(), 0.02).texture;
+    this.environmentMap = this.buildBattlefieldEnvironment(pmrem);
     this.scene.environment = this.environmentMap;
-    this.scene.environmentIntensity = 0.22;
+    // 室外天空的照度远高于室内影棚, 但直接用满会让甲片发白,
+    // 0.42 是"看得出天光反射、又不冲淡固有色"的位置。
+    this.scene.environmentIntensity = 0.42;
     pmrem.dispose();
+    this.applyHdriEnvironment(pmrem);
 
     this.camera = new THREE.PerspectiveCamera(
       32,
@@ -158,6 +164,120 @@ export class GameScene {
     this.scene.add(this.sky);
   }
 
+  /**
+   * 程序化生成"黄昏战场"环境贴图。
+   *
+   * 为什么需要: 默认环境是 three 自带的 RoomEnvironment —— 一个室内影棚,
+   * 它的反射是白色墙板和顶灯。用在沙场、铁甲、水面上会显得"棚拍",
+   * 金属缺少天空的冷调和地面的暖调。而 assets/env/ 里并没有 HDRI 文件,
+   * 所以这里直接搭一个小型天空场景, 交给 PMREMGenerator 烘成环境贴图。
+   *
+   * 做法: 自上而下渐变的天空球(天顶偏青、地平线偏橙) + 一圈地平线亮带
+   * (模拟低角度落日) + 一个太阳亮盘。这样盔甲高光会带一点黄昏的金色,
+   * 甲片暗部反射天空的青灰, 水面映出地平线的暖光。
+   */
+  buildBattlefieldEnvironment(pmrem) {
+    const sky = new THREE.Scene();
+
+    // 天空球: 用顶点色做垂直渐变
+    const domeGeometry = new THREE.SphereGeometry(60, 32, 24);
+    const position = domeGeometry.attributes.position;
+    const colors = [];
+    const top = new THREE.Color(0x5d7d96);      // 天顶: 冷青
+    const horizon = new THREE.Color(0xe8a465);  // 地平线: 落日橙
+    const bottom = new THREE.Color(0x6b5a44);   // 地面: 暖土色
+    for (let i = 0; i < position.count; i += 1) {
+      const y = position.getY(i) / 60;          // -1 ~ 1
+      const color = new THREE.Color();
+      if (y >= 0) {
+        // 天顶到地平线: 用 pow 让暖色更集中在地平线附近
+        color.copy(top).lerp(horizon, Math.pow(1 - y, 2.4));
+      } else {
+        color.copy(horizon).lerp(bottom, Math.min(1, -y * 2.2));
+      }
+      colors.push(color.r, color.g, color.b);
+    }
+    domeGeometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+    const dome = new THREE.Mesh(
+      domeGeometry,
+      new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide })
+    );
+    sky.add(dome);
+
+    // 地平线亮带: 模拟落日附近最亮的一条窄光带, 决定高光方向
+    const glow = new THREE.Mesh(
+      new THREE.SphereGeometry(58, 32, 12, 0, Math.PI * 2, Math.PI * 0.38, Math.PI * 0.16),
+      new THREE.MeshBasicMaterial({
+        color: 0xffc98a,
+        side: THREE.BackSide,
+        transparent: true,
+        opacity: 0.5,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+    );
+    sky.add(glow);
+
+    // 太阳: 一个亮盘, 让金属上有一处明确的主高光
+    const sun = new THREE.Mesh(
+      new THREE.SphereGeometry(5.5, 16, 12),
+      new THREE.MeshBasicMaterial({ color: 0xffd9a0 })
+    );
+    sun.position.set(-26, 15, -34);
+    sky.add(sun);
+
+    const env = pmrem.fromScene(sky, 0.04).texture;
+
+    domeGeometry.dispose();
+    dome.material.dispose();
+    glow.geometry.dispose();
+    glow.material.dispose();
+    sun.geometry.dispose();
+    sun.material.dispose();
+
+    return env;
+  }
+
+  /**
+   * 如果 assets/env/ 下存在黄昏战场 HDRI, 就用它替换程序化天空。
+   * 找不到文件就静默跳过, 保持程序化环境, 不影响任何现有表现。
+   *
+   * 放置文件: public/assets/env/battlefield-dusk.hdr
+   *
+   * 注意: Vite 的 dev server 对不存在的路径会返回 200 + index.html(SPA 回退),
+   * 所以不能用"HTTP 是否成功"判断文件在不在, 必须查 Content-Type。
+   */
+  applyHdriEnvironment(pmrem) {
+    const url = "assets/env/battlefield-dusk.hdr";
+    fetch(url, { method: "HEAD" })
+      .then((response) => {
+        if (!response.ok) return null;
+        const type = (response.headers.get("content-type") || "").toLowerCase();
+        // 真正的 HDR 文件不会是 text/html
+        if (type.includes("text/html")) return null;
+        return import("three/addons/loaders/HDRLoader.js");
+      })
+      .then((module) => {
+        const Loader = module?.HDRLoader;
+        if (!Loader) return;
+        new Loader().load(
+          url,
+          (texture) => {
+            texture.mapping = THREE.EquirectangularReflectionMapping;
+            const env = pmrem.fromEquirectangular(texture).texture;
+            this.scene.environment = env;
+            this.scene.environmentIntensity = 0.62;
+            texture.dispose();
+          },
+          undefined,
+          () => {}
+        );
+      })
+      .catch(() => {
+        // 没有文件 / 加载失败都保持默认环境, 不影响游戏
+      });
+  }
+
   setupLights() {
     const hemi = new THREE.HemisphereLight(0x93a89f, 0x4a3623, 0.5);
     this.scene.add(hemi);
@@ -168,16 +288,23 @@ export class GameScene {
     this.sun = new THREE.DirectionalLight(0xffc987, 4.1);
     this.sun.position.set(-11, 15.5, 9);
     this.sun.castShadow = true;
+    // 阴影贴图跟着视锥一起放大, 否则覆盖范围翻倍会让每个棋子的影子
+    // 变成锯齿块。3072/2048 是在 52 米视锥下仍能保住棋子影子的档位。
     this.sun.shadow.mapSize.set(
-      this.quality === "high" ? 2048 : 1024,
-      this.quality === "high" ? 2048 : 1024
+      this.quality === "high" ? 3072 : 2048,
+      this.quality === "high" ? 3072 : 2048
     );
-    this.sun.shadow.camera.left = -15;
-    this.sun.shadow.camera.right = 15;
-    this.sun.shadow.camera.top = 14;
-    this.sun.shadow.camera.bottom = -14;
+    // 阴影相机必须覆盖到营地(z 最远约 21), 否则远处帐篷没有影子。
+    //
+    // 原来只到 ±15/±14, 刚好只盖住棋盘。结果是营地帐篷全都没有投影,
+    // 在玩家默认的俯视视角下看着像"浮在空中" —— 一开始我以为是帐篷
+    // 坐标没贴地, 实测底部 gap 是 0.00, 真正缺的是影子。
+    this.sun.shadow.camera.left = -26;
+    this.sun.shadow.camera.right = 26;
+    this.sun.shadow.camera.top = 26;
+    this.sun.shadow.camera.bottom = -26;
     this.sun.shadow.camera.near = 1;
-    this.sun.shadow.camera.far = 38;
+    this.sun.shadow.camera.far = 62;
     this.sun.shadow.bias = -0.00018;
     this.sun.shadow.normalBias = 0.025;
     this.scene.add(this.sun);
@@ -277,10 +404,24 @@ export class GameScene {
     });
   }
 
-  async attachExternalModel(actor, piece) {
+  async attachExternalModel(actor, piece, attempt = 0) {
     const key = piece.side === SIDES.BLACK ? `${piece.type}-black` : piece.type;
     const model = await cloneModel(key);
-    if (actor.defeating || !actor.group.parent) return;
+    if (actor.defeating) return;
+    // actor 可能是"上一次 syncBoard 建好、这一次才轮到挂模型"的状态。
+    // 早先这里直接 return, 结果是棋子既没有外部模型、也没有程序化模型
+    // (创建时用了 deferSculpt: true), 变成隐形棋子 —— 实测表现为
+    // "红方 5 个老兵全都没有模型, 黑方 5 个正常"。
+    // 现在改成: 还没入场景就稍后重试, 重试若干次仍不行才退回程序化模型,
+    // 保证任何情况下棋子都看得见。
+    if (!actor.group.parent) {
+      if (attempt < 12) {
+        window.setTimeout(() => {
+          this.attachExternalModel(actor, piece, attempt + 1);
+        }, 60);
+        return;
+      }
+    }
     if (!model || !model.animations?.length) {
       actor.buildSculpt();
       return;
@@ -295,19 +436,52 @@ export class GameScene {
       }
     });
     scene.rotation.y = Math.PI;
-    const scaleByType = {
-      [PIECE_TYPES.SOLDIER]: 1.08,
-      [PIECE_TYPES.GENERAL]: 1.12,
-      [PIECE_TYPES.ADVISOR]: 1.1,
-      [PIECE_TYPES.ELEPHANT]: 1.02,
-      [PIECE_TYPES.HORSE]: 1.05,
-      [PIECE_TYPES.CHARIOT]: 1.0,
-      [PIECE_TYPES.CANNON]: 1.04,
+
+    // 按"目标高度 / 模型原始高度"反推缩放, 而不是给每个兵种手填系数。
+    //
+    // 为什么改: 原来是一张手写的 scaleByType 表(1.0~1.12), 但各兵种模型的
+    // 原始高度并不一致 —— 人形绑骨脚本归一到 4.30, 四足归一到 3.30,
+    // 军师 2.35。同一张系数表乘上去, 结果就是战象比人还矮、军师比老兵高一截。
+    // 改成按目标高度反推后, 任何新模型替换进来都会自动落在正确尺寸上。
+    const targetHeight = {
+      [PIECE_TYPES.ELEPHANT]: 3.85,
+      [PIECE_TYPES.CHARIOT]: 3.05,
+      [PIECE_TYPES.HORSE]: 3.15,
+      [PIECE_TYPES.GENERAL]: 2.95,
+      [PIECE_TYPES.ADVISOR]: 2.80,
+      [PIECE_TYPES.SOLDIER]: 2.62,
+      [PIECE_TYPES.CANNON]: 1.85,
     };
-    scene.scale.setScalar(scaleByType[piece.type] ?? 1.05);
+    // 各模型绑骨后的原始高度(世界单位), 用来换算缩放
+    const rawHeight = {
+      [PIECE_TYPES.ELEPHANT]: 3.30,
+      [PIECE_TYPES.CHARIOT]: 3.30,
+      [PIECE_TYPES.HORSE]: 3.30,
+      [PIECE_TYPES.GENERAL]: 3.30,
+      [PIECE_TYPES.ADVISOR]: 2.35,
+      [PIECE_TYPES.SOLDIER]: 3.30,
+      [PIECE_TYPES.CANNON]: 1.75,
+    };
+    const target = targetHeight[piece.type] ?? 3.0;
+    const raw = rawHeight[piece.type] ?? 3.3;
+    scene.scale.setScalar(target / raw);
+
     actor.group.add(scene);
     if (fallback) fallback.parent?.remove(fallback);
     actor.externalModel = scene;
+
+    // 落地校正: 把模型的最低点抬到刚好贴住地面。
+    // 绑骨脚本的"底面贴地"是骨骼绑定之前做的, 蒙皮权重建立后顶点位置
+    // 会随骨骼初始姿态偏移, 再加上棋子本身还有一个地形高度补偿,
+    // 结果就是有的棋子悬空、有的沉进地里(实测战象 -0.16, 骑兵 +0.47)。
+    //
+    // 必须先 updateMatrixWorld —— 上面刚改过 scene.scale, 矩阵还是旧的,
+    // 不改的话 Box3.setFromObject 会按未缩放时的尺寸算, 校正量直接算错,
+    // 表现成"所有模型都沉进地里"。
+    actor.group.updateMatrixWorld(true);
+    scene.updateMatrixWorld(true);
+    this.groundModel(actor, scene);
+
     if (animations.length) {
       const mixer = new THREE.AnimationMixer(scene);
       const byName = new Map();
@@ -342,6 +516,216 @@ export class GameScene {
         actor.currentAction = idle;
       }
     }
+
+    // 必须放在动画装配之后 —— 它依赖 actor.rig.base 已经就位
+    this.flattenBase(actor);
+  }
+
+  /**
+   * 把 AI 模型的底面精确贴到棋子所在地面。
+   *
+   * 关键难点: 这些模型是 SkinnedMesh, 而 THREE.Box3.setFromObject 用的是
+   * 几何体自身的 boundingBox —— 对蒙皮网格来说那是**绑定姿态的归一化盒子**
+   * (实测 piece-mesh 的 geoY 恒为 [-1.00, 1.00]), 跟模型真实占位没关系。
+   * 用它算落地校正, 得到的结果是"校正量为 0", 模型照旧陷在土里。
+   *
+   * 所以这里改成直接读**顶点在骨骼变换后的真实位置**:
+   * 对每个 SkinnedMesh 取 geometry 的 position 属性, 用
+   * boneTransform(顶点索引) 把顶点变换到骨骼空间, 再乘 mesh 的 matrixWorld,
+   * 得到真正会被渲染出来的范围, 用它的 minY 做校正。
+   *
+   * 只动 Y, 不碰 X/Z: 模型 X/Z 中心在绑骨脚本里已经居中过, 实测偏移 0.00。
+   */
+  groundModel(actor, model) {
+    if (!model || model.userData.grounded) return;
+    actor.group.updateMatrixWorld(true);
+
+    const minY = this.lowestRenderedY(model);
+    if (!Number.isFinite(minY)) {
+      // 非蒙皮模型: 退回普通包围盒
+      const box = new THREE.Box3().setFromObject(model);
+      if (!Number.isFinite(box.min.y)) return;
+      const toLocal = new THREE.Matrix4().copy(actor.group.matrixWorld).invert();
+      const localBox = box.clone().applyMatrix4(toLocal);
+      model.position.y += -localBox.min.y;
+      model.userData.grounded = true;
+      actor.group.updateMatrixWorld(true);
+      return;
+    }
+
+    // minY 是世界坐标下的最低点, 换算到 group 局部空间的 Y
+    const toLocal = new THREE.Matrix4().copy(actor.group.matrixWorld).invert();
+    const localPoint = new THREE.Vector3(0, minY, 0).applyMatrix4(toLocal);
+    const offset = -localPoint.y;
+    model.position.y += offset;
+    model.userData.grounded = true;
+    model.userData.groundOffset = offset;
+    actor.group.updateMatrixWorld(true);
+  }
+
+  /**
+   * 返回模型在**当前骨骼姿态**下、世界坐标里的最低 Y。
+   *
+   * 用 boneTransform 把每个顶点按其蒙皮权重变换到骨骼空间 —— 这是
+   * three.js 内部渲染时走的同一条路径, 所以结果就是玩家真正看到的底面。
+   * 顶点多的时候要限流, 否则 32 枚棋子 × 上万顶点会卡住首帧。
+   */
+  lowestRenderedY(model) {
+    const bone = new THREE.Vector3();
+    let lowest = Infinity;
+    let found = false;
+    model.traverse((mesh) => {
+      if (!mesh.isSkinnedMesh || !mesh.geometry?.attributes?.position) return;
+      found = true;
+      const position = mesh.geometry.attributes.position;
+      const count = position.count;
+      // 顶点太多时隔点采样: 底面是由大量密集顶点共同定义的,
+      // 隔点采样不会漏掉最低那一排, 但能把开销减半。
+      const stride = count > 12000 ? 3 : count > 4000 ? 2 : 1;
+      for (let i = 0; i < count; i += stride) {
+        bone.fromBufferAttribute(position, i);
+        mesh.applyBoneTransform(i, bone);
+        bone.applyMatrix4(mesh.matrixWorld);
+        if (bone.y < lowest) lowest = bone.y;
+      }
+    });
+    // 同时兼顾非蒙皮的附属件(武器/旗帜等)
+    model.traverse((mesh) => {
+      if (mesh.isSkinnedMesh || !mesh.isMesh || !mesh.geometry) return;
+      if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+      const bb = mesh.geometry.boundingBox;
+      const corner = new THREE.Vector3();
+      for (let xi = 0; xi < 2; xi += 1) {
+        for (let yi = 0; yi < 2; yi += 1) {
+          for (let zi = 0; zi < 2; zi += 1) {
+            corner.set(
+              xi ? bb.max.x : bb.min.x,
+              yi ? bb.max.y : bb.min.y,
+              zi ? bb.max.z : bb.min.z
+            );
+            corner.applyMatrix4(mesh.matrixWorld);
+            if (corner.y < lowest) {
+              lowest = corner.y;
+              found = true;
+            }
+          }
+        }
+      }
+    });
+    return found ? lowest : NaN;
+  }
+
+  /**
+   * 用了 AI 模型就把装饰性底座压成一枚贴地光环。
+   *
+   * 底座原本是给程序化棋子用的三层圆柱 + 铭牌。人形/战象踩在这样一个
+   * 圆盘上非常出戏, 但整个底座又不能直接删掉 —— 铭牌写着兵种汉字,
+   * 阵营色也是分清红黑的关键。所以做法是:
+   *   · 两层圆柱压扁到几乎贴地(保留阵营色, 变成光环)
+   *   · 铭牌保持朝上、略微抬高一点, 免得和地面 z-fighting
+   *   · 选中用的 glow 环不动
+   */
+  flattenBase(actor) {
+    const base = actor.rig?.base;
+    if (!base || base.userData.flattened) return;
+    base.userData.flattened = true;
+    base.traverse((child) => {
+      if (!child.isMesh) return;
+      if (child.geometry?.type === "CircleGeometry") {
+        // 铭牌: 留在贴近地面的位置, 稍微抬高避免闪烁
+        child.position.y = 0.012;
+        return;
+      }
+      if (child.geometry?.type === "TorusGeometry") {
+        child.position.y = 0.02;
+        child.scale.set(1, 1, 0.25);
+        return;
+      }
+      // 圆柱底座: 压扁成光环
+      child.scale.y = 0.03;
+      child.position.y = 0.006;
+    });
+
+    // 大体积棋子要把整圈底座放大, 否则会踩住自己的铭牌。
+    //
+    // 底座原尺寸是按程序化棋子(占地约 1.1)定的: 外圈半径 0.6、铭牌半径 0.4。
+    // 换成 AI 模型后, 战象的横向占地到了 1.44(半宽 0.72), 已经超过外圈 0.6,
+    // 于是象腿直接把铭牌压住, "象"字只剩一半露在外面。
+    const model = actor.externalModel;
+    if (model) {
+      // 横向半宽用和 groundModel 同一套"真实渲染范围"算法。
+      // 不能用 Box3.setFromObject: 蒙皮网格的 boundingBox 是绑定姿态的
+      // 归一化盒子(恒为 [-1,1]), 算出来的宽度和模型实际占位无关。
+      const halfWidth = this.renderedHalfWidth(model);
+      // 外圈基准半径 0.6, 留 12% 余量让光环露在模型外面
+      const needed = (halfWidth * 1.12) / 0.6;
+      if (Number.isFinite(needed) && needed > 1) {
+        base.scale.setScalar(0.94 * Math.min(needed, 1.65));
+      }
+    }
+  }
+
+  /**
+   * 返回模型在**当前骨骼姿态**下的世界横向半宽(相对自身中心)。
+   * 和 lowestRenderedY 同一套原理, 只是取 X/Z 而不是 Y。
+   */
+  renderedHalfWidth(model) {
+    const point = new THREE.Vector3();
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minZ = Infinity;
+    let maxZ = -Infinity;
+    let found = false;
+    model.traverse((mesh) => {
+      if (mesh.isSkinnedMesh && mesh.geometry?.attributes?.position) {
+        found = true;
+        const position = mesh.geometry.attributes.position;
+        const count = position.count;
+        const stride = count > 12000 ? 3 : count > 4000 ? 2 : 1;
+        for (let i = 0; i < count; i += stride) {
+          point.fromBufferAttribute(position, i);
+          mesh.applyBoneTransform(i, point);
+          point.applyMatrix4(mesh.matrixWorld);
+          if (point.x < minX) minX = point.x;
+          if (point.x > maxX) maxX = point.x;
+          if (point.z < minZ) minZ = point.z;
+          if (point.z > maxZ) maxZ = point.z;
+        }
+        return;
+      }
+      if (!mesh.isMesh || !mesh.geometry) return;
+      if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+      const bb = mesh.geometry.boundingBox;
+      for (let xi = 0; xi < 2; xi += 1) {
+        for (let zi = 0; zi < 2; zi += 1) {
+          for (let yi = 0; yi < 2; yi += 1) {
+            point.set(
+              xi ? bb.max.x : bb.min.x,
+              yi ? bb.max.y : bb.min.y,
+              zi ? bb.max.z : bb.min.z
+            );
+            point.applyMatrix4(mesh.matrixWorld);
+            if (point.x < minX) minX = point.x;
+            if (point.x > maxX) maxX = point.x;
+            if (point.z < minZ) minZ = point.z;
+            if (point.z > maxZ) maxZ = point.z;
+            found = true;
+          }
+        }
+      }
+    });
+    if (!found) return NaN;
+    // 必须减去棋子自身的世界位置。
+    // renderedHalfWidth 量的是世界坐标, 而棋子站在棋盘各处(比如 soldier 在
+    // x=-7.92), 直接取 max(|minX|,|maxX|) 会把"棋子离原点的距离"当成
+    // "模型的半宽" —— 实测读出来 8.5, 远超格子宽度 1.98, 于是底座被一路
+    // 放大到上限, 表现为所有大棋子的光环都大了一圈。
+    const center = new THREE.Vector3();
+    model.getWorldPosition(center);
+    // 只用横向(X)半宽, 不用纵深(Z): 战象/战车/骑兵都是长条形
+    // (纵深 2.4~2.7, 横向只有 1.0~1.5)。把纵深算进来会把光环撑到近两倍,
+    // 横向白白多出一大圈, 反而挤到左右邻格。真正踩铭牌的是横向的腿/轮。
+    return Math.max(Math.abs(minX - center.x), Math.abs(maxX - center.x));
   }
 
   setSelected(piece, moves = []) {
@@ -554,14 +938,44 @@ export class GameScene {
       terrainHeightAt(toPosition.x, toPosition.z) + 0.05,
       toPosition.z
     );
-    const duration = options.duration ?? (actor.piece.type === PIECE_TYPES.HORSE ? 0.46 : 0.4);
+    // 各兵种位移速度不同: 骑兵冲锋最快, 战象/炮车最慢。
+    // 统一 0.4s 会让轻骑兵显得拖着步子走、重装单位显得瞬移。
+    const moveDurationByType = {
+      [PIECE_TYPES.ELEPHANT]: 0.68,
+      [PIECE_TYPES.CANNON]: 0.62,
+      [PIECE_TYPES.GENERAL]: 0.52,
+      [PIECE_TYPES.CHARIOT]: 0.5,
+      [PIECE_TYPES.ADVISOR]: 0.5,
+      [PIECE_TYPES.SOLDIER]: 0.46,
+      [PIECE_TYPES.HORSE]: 0.44,
+    };
+    const duration =
+      options.duration ?? moveDurationByType[actor.piece.type] ?? 0.46;
     const startTime = performance.now() / 1000;
     const direction = end.clone().sub(start);
     actor.group.rotation.y = Math.atan2(direction.x, direction.z);
     const isHorse = actor.piece.type === PIECE_TYPES.HORSE;
 
+    // 走路动作交给模型自带的 Move 片段。
+    // 早先这里从不播 Move —— controller 对"任何一步"都调 playAttack,
+    // 结果所有棋子一到移动就摆攻击姿势, 走路的 clip 从来没被用过。
+    if (!options.noWalk) this.playMove(piece, { seconds: duration });
+
     return new Promise((resolve) => {
+      let settled = false;
+      let guard = 0;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(guard);
+        actor.group.position.copy(end);
+        actor.group.rotation.y = actor.baseYaw;
+        // 走到位置后收步态, 否则棋子会僵在迈步姿势上原地踏步
+        this.stopMove(actor.piece);
+        resolve();
+      };
       const animate = () => {
+        if (settled) return;
         const now = performance.now() / 1000;
         const elapsed = now - startTime;
         const t = Math.min(1, elapsed / duration);
@@ -579,13 +993,51 @@ export class GameScene {
         if (t < 1) {
           requestAnimationFrame(animate);
         } else {
-          actor.group.position.copy(end);
-          actor.group.rotation.y = actor.baseYaw;
-          resolve();
+          finish();
         }
       };
+      // 兜底: requestAnimationFrame 在页面切到后台、渲染循环被节流时
+      // 会长时间不触发。没有这个定时器, 棋子会永远停在半路,
+      // 而且 controller 会因为 await 不到而一直 busy, 表现成"点击没反应"。
+      guard = window.setTimeout(finish, duration * 1000 + 600);
       requestAnimationFrame(animate);
     });
+  }
+
+  /**
+   * 播走路的循环动作。返回一个步态周期的秒数, 0 表示没有可用的 walk clip。
+   *
+   * 循环次数按"位移时间 / 一个步态周期"折算, 这样走得远的步数会多迈几步,
+   * 而不是一个周期走完全程(那样像是在滑行)。
+   */
+  playMove(piece, options = {}) {
+    const actor = this.actors.get(piece?.id);
+    if (actor?.actions?.move) {
+      const action = playActorAction(actor, "move", { fade: 0.12 });
+      if (action) {
+        const clipSeconds = Math.max(0.2, action.getClip().duration);
+        const travelSeconds = options.seconds ?? 0.4;
+        action.setLoop(
+          THREE.LoopRepeat,
+          Math.max(1, Math.round(travelSeconds / clipSeconds))
+        );
+        action.timeScale = options.timeScale ?? 1;
+        actor.moving = true;
+        return clipSeconds;
+      }
+    }
+    // 没有行走 clip 的旧资源: 退回原来的程序化摆动
+    actor?.move?.(options);
+    return 0;
+  }
+
+  stopMove(piece) {
+    const actor = this.actors.get(piece?.id);
+    if (!actor) return;
+    actor.moving = false;
+    if (actor.actions?.move && actor.currentAction === actor.actions.move) {
+      playActorAction(actor, "idle", { fade: 0.18 });
+    }
   }
 
   playAttack(piece, kind, onHit) {
@@ -648,29 +1100,36 @@ export class GameScene {
   defeatActor(id, duration = 520) {
     const actor = this.actors.get(id);
     if (!actor) return Promise.resolve();
+
+    // 倒地由 actor.beginDefeat() 统一驱动, 按兵种给不同的翻倒姿态。
+    //
+    // 走过的弯路: 我一开始在这里另写了一套 defeatChoreography, 想按兵种
+    // 差异化。但它和 actor.update() 里的 updateDefeat() 打架 —— 只要
+    // actor.defeating 为真, update() 每帧都会用固定值覆盖 group.rotation
+    // (z=1.18, x=0.22) 和 position.y, 我写的角度根本留不住。实测七个兵种
+    // 倒下后 rz 全是 1.180, 就是被这里覆盖的。
+    //
+    // 正确做法是让倒地只有一个写入者: 差异化做进 PieceActor 自己的
+    // defeatProfile(见 pieces.js), 这里只负责"叫它倒、等它倒完、再移除"。
+    actor.setDefeatProfile?.(actor.piece?.type);
+
+    // 模型自带的 Defeat 片段仍然播 —— 它是"人倒下过程中的挣扎/姿态",
+    // 叠在刚体倒地之上, 比纯刚体自然。没有这个片段也不影响倒地。
     if (actor.mixer) {
-      const action = playActorAction(actor, "defeat", { clamp: true, fade: 0.14 });
-      if (action) {
-        const durationMs = Math.max(duration, action.getClip().duration * 1000 * 0.7);
-        actor.defeating = true;
-        this.retiringIds.add(id);
-        return new Promise((resolve) => {
-          window.setTimeout(() => {
-            this.retiringIds.delete(id);
-            this.removeActor(id);
-            resolve();
-          }, durationMs);
-        });
-      }
+      playActorAction(actor, "defeat", { clamp: true, fade: 0.14 });
     }
-    actor.beginDefeat(duration / 1000);
+    actor.beginDefeat(actor.defeatDuration || 0.76);
+    actor.defeating = true;
     this.retiringIds.add(id);
+
+    // 等倒地播完再移除, 否则会"倒一半突然消失"
+    const holdMs = Math.max(duration, (actor.defeatDuration || 0.76) * 1000 + 110);
     return new Promise((resolve) => {
       window.setTimeout(() => {
         this.retiringIds.delete(id);
         this.removeActor(id);
         resolve();
-      }, duration);
+      }, holdMs);
     });
   }
 
@@ -693,6 +1152,11 @@ export class GameScene {
   removeActor(id) {
     const actor = this.actors.get(id);
     if (!actor) return;
+    // 取消可能还在跑的倒地帧, 免得它继续持有已经脱离场景的 group
+    if (actor.defeatRaf) {
+      window.cancelAnimationFrame(actor.defeatRaf);
+      actor.defeatRaf = 0;
+    }
     actor.group.parent?.remove(actor.group);
     this.actors.delete(id);
   }

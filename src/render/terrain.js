@@ -146,10 +146,19 @@ export function createTerrain(materials, quality = "high") {
     // Pale weathered paving laid into the ground across the playable grid.
     // Blending the colour instead of adding a raised slab keeps the terrain
     // continuous: no plateau edge, no seam against the surrounding ground.
-    const boardX = x / ((BOARD_COLUMNS - 1) * BOARD_SPACING.x * 0.58);
-    const boardZ = z / ((BOARD_ROWS - 1) * BOARD_SPACING.y * 0.54);
+    //
+    // 注意这两个归一化系数: 原来写的是 0.58 / 0.54, 也就是把"看得见的铺装区"
+    // 缩到了真实棋盘的 58%/54%。结果是棋子站在浅色区域之外 —— 俯视时非常明显,
+    // 红方前排和黑方后排都落在格线外的土地上, 玩家会以为棋子"跑出格子了"。
+    // 正确的做法是让铺装范围正好覆盖"最后一排格子的中心再外扩半格",
+    // 即 X 用 8 格间距 / Z 用 9 格间距, 再加上半格余量。
+    const boardHalfX = ((BOARD_COLUMNS - 1) / 2 + 0.5) * BOARD_SPACING.x;
+    const boardHalfZ = ((BOARD_ROWS - 1) / 2 + 0.5) * BOARD_SPACING.y;
+    const boardX = x / boardHalfX;
+    const boardZ = z / boardHalfZ;
     const boardDistance = Math.hypot(boardX, boardZ);
-    const paving = 1 - smoothstep(0.72, 1.04, boardDistance);
+    // 1.0 往外再留一点过渡, 让铺装边缘自然融进土地而不是硬切
+    const paving = 1 - smoothstep(0.94, 1.12, boardDistance);
     const slabVariation = fbm(x * 2.1 - 5, z * 2.1 + 9);
     const slabShade = 0.66 + slabVariation * 0.14;
     colors.push(
@@ -555,6 +564,12 @@ export function createBoundaryDetails(materials, quality = "high") {
     const radius = 11.5 + hash2d(i, 6) * 6.5;
     const x = Math.cos(angle) * radius;
     const z = Math.sin(angle) * radius * 0.72;
+    // 排除"棋盘 + 相机活动区"。
+    // 原来只排除 |x|<10.2 && |z|<9.6, 但玩家默认相机在 z≈14 一带
+    // (红方身后), 于是会有一颗石头正好落在镜头前 3.5 米处, 在 32° FOV 下
+    // 被放大成一坨挡住半个画面的巨石 —— 看起来像模型出错, 其实只是距离太近。
+    // 所以把短边方向(z)的排除范围扩到 13.5, 连相机站的那条带子一起清空。
+    if (Math.abs(z) < 13.5 && Math.abs(x) < 11.5) continue;
     if (Math.abs(x) < 10.2 && Math.abs(z) < 9.6) continue;
     const scale = 0.12 + hash2d(i, 9) * 0.42;
     const geometry = new THREE.DodecahedronGeometry(scale, 1);
@@ -579,9 +594,21 @@ export function createBoundaryDetails(materials, quality = "high") {
   const treeCount = quality === "high" ? 40 : 20;
   for (let i = 0; i < treeCount; i += 1) {
     const angle = (i / treeCount) * Math.PI * 2 + hash2d(i, 12) * 0.5;
-    const radius = 12.4 + Math.pow(hash2d(i, 12), 0.7) * 8.4;
+    // 树往外推: 原来最近的一圈落在半径 12.4, 在世界里离棋盘边缘只有约 1.4,
+    // 斜俯视时树冠会正好投影到前排棋子上(实测红方前排被一棵松树挡住)。
+    // 近端(棋盘短边方向)尤其明显, 所以整体半径加大, 并且靠近棋盘的
+    // 方向再多让出一段。
+    const radius = 15.2 + Math.pow(hash2d(i, 12), 0.7) * 8.4;
     const x = Math.cos(angle) * radius;
     const z = Math.sin(angle) * radius * 0.72;
+    // 排除"棋盘 + 营地 + 相机活动区"。
+    //
+    // 玩家默认相机在 z≈14 一带(红方身后) 俯视棋盘。原来只排除到 |z|<10,
+    // 于是 z=11~15 的树正好长在镜头前 2.6~4 米处, 斜视角下被放大成一坨
+    // 挡住左下角的棕色块 —— 前两轮我把它误判成"巨石", 其实一直是树。
+    // 营地帐篷占 z≈12.8~17, 所以树的排除区必须推到 19 以外,
+    // 让相机和营地之间留出一条干净的通视带。
+    if (Math.abs(z) < 19.0 && Math.abs(x) < 15.0) continue;
     if (Math.abs(x) < 10.4 && Math.abs(z) < 10.0) continue;
     if (Math.abs(z) < 3.4 && Math.abs(x) < 14) continue;
 
@@ -589,8 +616,12 @@ export function createBoundaryDetails(materials, quality = "high") {
     const tree = new THREE.Group();
     tree.position.set(x, y, z);
     tree.rotation.y = hash2d(i, 29) * Math.PI * 2;
+    // 靠近棋盘短边(玩家视角的"上下")的树压矮, 避免遮住前排棋子
+    const nearBoardZ = Math.max(0, 1 - Math.max(0, Math.abs(z) - 9) / 6);
     const kind = hash2d(i, 33) < 0.58 ? "pine" : "broad";
-    const height = (kind === "pine" ? 1.35 : 1.15) + hash2d(i, 18) * 1.1;
+    // 越靠近棋盘短边越矮(最多压到 62%), 远处的树保持原高度以撑住景深
+    const height = ((kind === "pine" ? 1.35 : 1.15) + hash2d(i, 18) * 1.1) *
+      (1 - nearBoardZ * 0.38);
     const lean = (hash2d(i, 37) - 0.5) * 0.14;
 
     const trunk = new THREE.Mesh(
@@ -715,6 +746,169 @@ export function createBoundaryDetails(materials, quality = "high") {
     banner.position.set(x + (x < 0 ? 0.58 : -0.58), y + 2.7, z);
     group.add(banner);
   });
+
+  // ---- 中景层: 两军营地 ----
+  //
+  // 为什么需要:
+  //   原来只有"棋盘 + 外圈树林"两层, 中间是一大片什么都没有的空地
+  //   (俯视图看得最清楚)。玩家的反馈是"战场显得很小气, 没有两军交战的
+  //   宏大/大气感"。空旷本身不是问题, 问题是空旷里没有任何叙事线索 ——
+  //   看不出这是两军对垒的战场, 只像一块放在地上的毯子。
+  //
+  // 这里加的是"两军各自的营地", 布局按真实扎营逻辑:
+  //   · 红营在 +Z(红方身后), 黑营在 -Z(黑方身后), 各自背对己方棋阵
+  //   · 每营有帅旗(最高)、两排错落的帐篷、拒马(防骑兵的木桩)
+  //   · 靠近棋盘的那排帐篷压矮, 避免斜视角下遮住前排棋子
+  buildCamps(group, bark, hash2d);
+
+  return group;
+}
+
+/**
+ * 生成两军营地。全部程序化, 不引入外部资源。
+ * 红营在 +Z, 黑营在 -Z(与棋子阵营方向一致)。
+ *
+ * 尺度按玩家真实相机来定: 默认相机在 (±3.2, 21.4, ±28.6), 距棋盘中心 35 米、
+ * 俯视约 37°。在这个视角下, 棋盘(15.8×15.3)在画面上只占中间一条,
+ * 上下各留出大片地面 —— 那片地面就是"战场"该出现的地方。
+ *
+ * 所以营地要"小而成群、层层后退", 而不是"几个大帐篷":
+ *   · 帐篷缩到 0.5~0.85(原来 0.85~1.3 太大, 挤到棋盘边上)
+ *   · 三排纵深: 11.5 / 15.0 / 19.5, 越远越大, 形成透视压缩
+ *   · 每排 9 顶, 密一点才像"连营", 稀疏的几顶反而显得空旷
+ */
+function buildCamps(group, bark, hash2d) {
+  // 军帐用暗土黄/褐布色, 才能从黄土里"跳"出来
+  const clothOf = (i) =>
+    new THREE.MeshStandardMaterial({
+      color: [0x6b5738, 0x745e3d, 0x5c4a30, 0x7d6644][i % 4],
+      roughness: 0.94,
+      side: THREE.DoubleSide,
+    });
+
+  for (const side of ["red", "black"]) {
+    const dirZ = side === "red" ? 1 : -1;
+
+    // 三排帐篷, 越远越大、越密, 用透视压缩制造"纵深很深的连营"
+    const rows = [
+      { z: 11.5, size: 0.52, count: 9, spread: 22 },
+      { z: 15.2, size: 0.68, count: 9, spread: 24 },
+      { z: 19.8, size: 0.86, count: 8, spread: 26 },
+    ];
+    rows.forEach((row, ri) => {
+      for (let i = 0; i < row.count; i += 1) {
+        const t = row.count === 1 ? 0.5 : i / (row.count - 1);
+        const x = -row.spread / 2 + t * row.spread + (hash2d(i, 61 + ri) - 0.5) * 1.8;
+        const z = dirZ * (row.z + hash2d(i, 62 + ri) * 1.4);
+        const y = terrainHeightAt(x, z);
+        const size = row.size * (0.85 + hash2d(i, 63 + ri) * 0.32);
+        const tent = makeTent(size, clothOf(i + ri + (side === "red" ? 0 : 2)));
+        tent.position.set(x, y, z);
+        tent.rotation.y = hash2d(i, 64 + ri) * Math.PI * 2;
+        group.add(tent);
+      }
+    });
+
+    // 帅旗: 营地里唯一的"高物件", 用来交代这是哪一方的营盘
+    const bannerX = side === "red" ? -12.6 : 12.6;
+    const bannerZ = dirZ * 13.4;
+    const banner = makeCampBanner(side);
+    banner.position.set(bannerX, terrainHeightAt(bannerX, bannerZ), bannerZ);
+    group.add(banner);
+
+    // 拒马: 摆在营地朝向敌阵的一侧(棋盘和营地之间的那条带子),
+    // 交代"这里在防骑兵"。高度压低, 避免在斜视角里挡住前排棋子。
+    for (let i = 0; i < 6; i += 1) {
+      const x = -12 + i * 4.8 + (hash2d(i, 71) - 0.5) * 1.4;
+      const z = dirZ * (9.6 + hash2d(i, 72) * 0.6);
+      const barricade = makeBarricade(bark);
+      barricade.position.set(x, terrainHeightAt(x, z), z);
+      barricade.rotation.y = (hash2d(i, 73) - 0.5) * 0.5;
+      barricade.scale.setScalar(0.8);
+      group.add(barricade);
+    }
+  }
+}
+
+/** 帐篷: 八角柱身 + 圆锥顶 + 顶旗杆 */
+function makeTent(size, material) {
+  const tent = new THREE.Group();
+
+  const base = new THREE.Mesh(
+    new THREE.CylinderGeometry(size * 0.62, size * 0.78, size * 0.55, 8),
+    material
+  );
+  base.position.y = size * 0.28;
+  base.castShadow = true;
+  base.receiveShadow = true;
+  tent.add(base);
+
+  const roof = new THREE.Mesh(new THREE.ConeGeometry(size * 0.86, size * 0.85, 8), material);
+  roof.position.y = size * 0.72 + size * 0.42;
+  roof.castShadow = true;
+  tent.add(roof);
+
+  const pole = new THREE.Mesh(
+    new THREE.CylinderGeometry(size * 0.028, size * 0.028, size * 0.5, 5),
+    material
+  );
+  pole.position.y = size * 1.14 + size * 0.25;
+  tent.add(pole);
+
+  return tent;
+}
+
+/** 拒马: 三根交叉木桩 + 一根横杆 */
+function makeBarricade(bark) {
+  const bar = new THREE.Group();
+  const size = 0.95;
+  for (let i = 0; i < 3; i += 1) {
+    const spike = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.06, size * 1.5, 6), bark);
+    spike.position.set((i - 1) * size * 0.5, size * 0.62, 0);
+    spike.rotation.z = (i - 1) * 0.38;
+    spike.castShadow = true;
+    bar.add(spike);
+  }
+  const cross = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, size * 2.1, 6), bark);
+  cross.rotation.z = Math.PI / 2;
+  cross.position.y = size * 0.72;
+  cross.castShadow = true;
+  bar.add(cross);
+  return bar;
+}
+
+/** 营帅旗: 高杆 + 长条旗面(旗面交给 updateBoundaryDetails 做飘动) */
+function makeCampBanner(side) {
+  const group = new THREE.Group();
+  const height = 4.6;
+
+  const pole = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.075, 0.1, height, 7),
+    new THREE.MeshStandardMaterial({ color: 0x4a3728, roughness: 0.95 })
+  );
+  pole.position.y = height / 2;
+  pole.castShadow = true;
+  group.add(pole);
+
+  const bannerMaterial = new THREE.MeshStandardMaterial({
+    color: side === "red" ? 0xa8322c : 0x2f3a4d,
+    roughness: 0.88,
+    side: THREE.DoubleSide,
+  });
+  const flag = new THREE.Mesh(new THREE.PlaneGeometry(0.72, 2.5, 6, 10), bannerMaterial);
+  flag.position.set(0.4, height - 1.5, 0);
+  flag.castShadow = true;
+  // 记下基准顶点, 交给 updateBoundaryDetails 做飘动
+  flag.userData.basePositions = Float32Array.from(flag.geometry.attributes.position.array);
+  flag.userData.phase = side === "red" ? 0 : 1.7;
+  group.add(flag);
+
+  const finial = new THREE.Mesh(
+    new THREE.ConeGeometry(0.1, 0.34, 6),
+    new THREE.MeshStandardMaterial({ color: 0x9a7b3f, roughness: 0.5, metalness: 0.6 })
+  );
+  finial.position.y = height + 0.15;
+  group.add(finial);
 
   return group;
 }

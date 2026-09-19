@@ -714,6 +714,33 @@ export class PieceActor {
     this.onHit = onHit;
   }
 
+  /**
+   * 按兵种设定倒地姿态。
+   *
+   * 原来所有兵种共用一套固定值(tilt 1.18 / pitch 0.22 / sink 0.34),
+   * 于是战象和一个步兵倒下去的幅度完全一样 —— 象那么重的东西轻轻一侧
+   * 就"躺平"了, 看着很轻。这里按体态给各自的量:
+   *   · 直立的人   —— 侧翻 + 明显前倾, 倒得快
+   *   · 有坐骑的   —— 侧翻幅度大(连人带马), 稍慢
+   *   · 战象       —— 最慢、下沉最多, 像一座塌下来的塔
+   *   · 炮车       —— 结构件, 前倾少、横向翻, 像车架散掉
+   */
+  setDefeatProfile(type) {
+    const profiles = {
+      soldier:  { tilt: 1.18, pitch: 0.22, sink: 0.34, dur: 0.60 },
+      advisor:  { tilt: 1.10, pitch: 0.30, sink: 0.30, dur: 0.68 },
+      general:  { tilt: 1.06, pitch: 0.18, sink: 0.32, dur: 0.72 },
+      horse:    { tilt: 1.32, pitch: 0.34, sink: 0.42, dur: 0.78 },
+      chariot:  { tilt: 1.24, pitch: 0.26, sink: 0.46, dur: 0.84 },
+      cannon:   { tilt: 1.14, pitch: 0.20, sink: 0.50, dur: 0.80 },
+      elephant: { tilt: 1.28, pitch: 0.12, sink: 0.62, dur: 1.05 },
+    };
+    const p = profiles[type] || profiles.soldier;
+    this.defeatProfile = p;
+    // defeatActor 用这个值决定"等多久才移除棋子", 必须和实际倒地时长一致
+    this.defeatDuration = p.dur;
+  }
+
   beginDefeat(duration = 0.76) {
     if (this.defeating) return;
     this.defeating = true;
@@ -727,9 +754,10 @@ export class PieceActor {
     const progress = Math.min(1, (time - this.defeatAt) / this.defeatDuration);
     const eased = progress * progress * (3 - 2 * progress);
     const direction = this.group.rotation.y > Math.PI / 2 ? -1 : 1;
-    this.group.rotation.z = direction * eased * 1.18;
-    this.group.rotation.x = eased * 0.22;
-    this.group.position.y = this.baseHeight - eased * 0.34;
+    const p = this.defeatProfile || { tilt: 1.18, pitch: 0.22, sink: 0.34 };
+    this.group.rotation.z = direction * eased * p.tilt;
+    this.group.rotation.x = eased * p.pitch;
+    this.group.position.y = this.baseHeight - eased * p.sink;
     const scale = 1 - Math.max(0, progress - 0.68) * 0.75;
     this.group.scale.setScalar(scale);
   }

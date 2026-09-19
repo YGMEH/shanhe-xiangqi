@@ -3,8 +3,6 @@ import {
   BOARD_ROWS,
   PIECE_TYPES,
   SIDES,
-  bridgeAt,
-  crossesRiver,
   inBoard,
   isRed,
   keyOf,
@@ -57,10 +55,14 @@ function countBetween(state, fromX, fromY, toX, toY) {
   return count;
 }
 
-function canCrossRiver(piece, fromX, fromY, toX, toY) {
-  if (!crossesRiver(fromY, toY)) return true;
-  if (fromX !== toX) return false;
-  return bridgeAt(fromX);
+/**
+ * 标准象棋里, 车/炮/兵过河都不受"桥"的限制, 河流只是地形装饰。
+ * 之前的实现强制要求站在 BRIDGE_COLUMNS 上才能跨越第 4/5 行,
+ * 导致"炮无法跨河""车无法平移"等非标准行为, 已移除。
+ * 保留此函数是为了将来若要开启"桥梁规则"变体时可以一键切回。
+ */
+function canCrossRiver() {
+  return true;
 }
 
 export function getPseudoMoves(state, piece) {

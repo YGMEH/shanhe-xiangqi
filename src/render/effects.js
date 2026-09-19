@@ -202,6 +202,18 @@ export class EffectsSystem {
     const smokePuffs = [];
     let impacted = false;
     return new Promise((resolve) => {
+      // 兜底: 这个 Promise 原本只在 dispose() 里 resolve, 而 dispose 依赖特效
+      // 系统的 update 循环跑完。一旦渲染循环被节流/暂停, 或特效队列异常,
+      // dispose 就不会被调用, Promise 永远挂住 -> 上游 busy 卡死 ->
+      // 整局再也点不动棋子。炮吃子正好走这条分支, 症状特别明显。
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      window.setTimeout(done, 2600);
+
       this.add({
         elapsed: 0,
         duration: 0.56,
@@ -252,7 +264,7 @@ export class EffectsSystem {
           tracer.material.dispose();
           projectile.geometry.dispose();
           projectile.material.dispose();
-          resolve();
+          done();
         },
       });
     });

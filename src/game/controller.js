@@ -210,7 +210,21 @@ export class GameController {
       return;
     }
     this.busy = true;
-    this.clearSelection();
+    try {
+      await this.runMove(move, { byAi, skipSync, movingPiece });
+    } catch (error) {
+      // 关键: 这里面的动画/音效都是 await 的, 任意一步抛错都会让 busy 永远
+      // 停在 true, 之后所有点击都被开头的 if (this.busy) 拦掉, 表现为
+      // "点了没反应、棋子不动", 尤其容易发生在炮吃子这条分支上。
+      // 用一个兜底释放, 保证一局里不会因为一次动画异常而彻底锁死。
+      console.error("行棋过程出错, 已恢复可下子状态:", error);
+      this.ui.showToast("行棋动作异常, 已恢复");
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  async runMove(move, { byAi = false, skipSync = false, movingPiece } = {}) {
     const captured = this.state.pieceAt(move.x, move.y);
     const from = { x: movingPiece.x, y: movingPiece.y };
     const to = { x: move.x, y: move.y };
@@ -242,30 +256,34 @@ export class GameController {
 
     const attackDelay = isCannon && isCapture ? 0 : 95;
 
-    if (isCannon && isCapture && captured) {
-      this.scene.playAttack(
-        movingPiece,
-        attackKind,
-        () => {
+    // 动作分层: 走路就播走路, 吃子才播攻击。
+    // 早先这里对"任何一步"都调 playAttack, 结果所有棋子一到移动就摆攻击姿势,
+    // 四条腿/车轮的行走动画根本没机会播 —— 实测"象走子时 clip -> Attack"。
+    // 行走动作由 scene.animateMove 在位移开始时自己起, 这里只管吃子。
+    if (isCapture) {
+      if (isCannon && captured) {
+        this.scene.playAttack(
+          movingPiece,
+          attackKind,
+          () => {
+            this.audio.capture(attackKind);
+            this.scene.killAt(to.x, to.y, true);
+            this.scene.killFocus(to.x, to.y, {
+              distance: 12.5,
+              hold: 520,
+            });
+          }
+        );
+      } else {
+        this.scene.playAttack(movingPiece, attackKind, () => {
           this.audio.capture(attackKind);
-          this.scene.killAt(to.x, to.y, true);
+          this.scene.killAt(to.x, to.y, false);
           this.scene.killFocus(to.x, to.y, {
-            distance: 12.5,
-            hold: 520,
+            distance: 10.5,
+            hold: 360,
           });
-        }
-      );
-    } else if (captured) {
-      this.scene.playAttack(movingPiece, attackKind, () => {
-        this.audio.capture(attackKind);
-        this.scene.killAt(to.x, to.y, false);
-        this.scene.killFocus(to.x, to.y, {
-          distance: 10.5,
-          hold: 360,
         });
-      });
-    } else {
-      this.scene.playAttack(movingPiece, attackKind);
+      }
     }
 
     await wait(attackDelay);
@@ -302,7 +320,6 @@ export class GameController {
 
     this.state.turn = oppositeSide(movingPiece.side);
     this.positionKeys.push(positionKey(this.state.pieces, this.state.turn));
-    this.busy = false;
 
     if (!skipSync) this.resolveTurnState();
     this.commit();

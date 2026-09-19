@@ -1,8 +1,14 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { clone as cloneSkeleton } from "three/addons/utils/SkeletonUtils.js";
+import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 
 const loader = new GLTFLoader();
+// 用 gltf-transform --compress meshopt 处理过的 GLB, 顶点数据是 meshopt 压缩的。
+// 不注册解码器的话, 加载会直接抛
+//   "THREE.GLTFLoader: setMeshoptDecoder must be called before loading compressed files"
+// 棋子就会退回程序化模型(实测炮车整只消失)。
+loader.setMeshoptDecoder(MeshoptDecoder);
 const cache = new Map();
 
 export const MODEL_MANIFEST = Object.freeze({
@@ -29,12 +35,31 @@ export function loadModel(key) {
     ? new Promise((resolve) => {
         loader.load(
           url,
-          (gltf) => resolve(prepareModel(gltf.scene, gltf.animations ?? [])),
+          (gltf) => {
+            // prepareModel 里会克隆材质、调 PBR 参数, 任何一步抛错都会让
+            // 这个 Promise 永远不 settle —— 调用方 await 之后再也醒不过来,
+            // 那个棋子就永远没有模型(实测: 红方 5 个老兵全空, 黑方正常,
+            // 就是因为红方先加载、先踩到了这条路径)。
+            // 这里兜住异常, 至少让 Promise 正常结束并退回程序化模型。
+            try {
+              resolve(prepareModel(gltf.scene, gltf.animations ?? []));
+            } catch (error) {
+              console.error(`模型 ${key} 处理失败:`, error);
+              resolve(null);
+            }
+          },
           undefined,
-          () => resolve(null)
+          (error) => {
+            console.error(`模型 ${key} 加载失败:`, error);
+            resolve(null);
+          }
         );
       })
     : Promise.resolve(null);
+  // 失败的条目不要永久缓存, 否则后续同类棋子全部拿不到模型
+  promise.then((result) => {
+    if (!result) cache.delete(key);
+  });
   cache.set(key, promise);
   return promise;
 }
