@@ -708,7 +708,9 @@ export class PieceActor {
   }
 
   attack(type, onHit) {
-    this.attackAt = performance.now() / 1000;
+    // 和 beginDefeat 一样, 基准交给 update() 传进来的 time,
+    // 不能自己取 performance.now() —— 那和 THREE.Clock 不是一个时间轴。
+    this.attackAt = -1;
     this.attackType = type;
     this.hitCalled = false;
     this.onHit = onHit;
@@ -744,13 +746,23 @@ export class PieceActor {
   beginDefeat(duration = 0.76) {
     if (this.defeating) return;
     this.defeating = true;
-    this.defeatAt = performance.now() / 1000;
+    // 时间基准必须和 updateDefeat 收到的 time 是同一个钟。
+    //
+    // 踩过的坑: 这里原来用 performance.now()/1000(页面加载起算), 但
+    // update() 传进来的 time 是 THREE.Clock 的 elapsedTime(时钟创建起算),
+    // 两者差一个恒定偏移(约几千毫秒)。于是 progress 会算出几千,
+    // eased 变成天文数字, 棋子瞬间被甩到几米外 —— 实测 rotation.z 到了
+    // +984、位置 Y 到了 -283。
+    // 修正做法是把基准交给 scene 每帧传进来的 time, 不自己取时钟。
+    this.defeatAt = -1;
     this.defeatDuration = duration;
     this.attackAt = -1;
     this.attackType = null;
   }
 
   updateDefeat(time) {
+    // 第一帧才确定基准, 保证和 update() 用的是同一个时间轴
+    if (this.defeatAt < 0) this.defeatAt = time;
     const progress = Math.min(1, (time - this.defeatAt) / this.defeatDuration);
     const eased = progress * progress * (3 - 2 * progress);
     const direction = this.group.rotation.y > Math.PI / 2 ? -1 : 1;
@@ -763,6 +775,7 @@ export class PieceActor {
   }
 
   updateAttack(time, motionScale) {
+    if (this.attackAt < 0) this.attackAt = time;
     const elapsed = time - this.attackAt;
     const progress = Math.min(1, elapsed / this.attackDuration);
     const strike = Math.sin(progress * Math.PI);

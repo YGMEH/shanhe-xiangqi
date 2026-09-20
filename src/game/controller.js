@@ -251,7 +251,9 @@ export class GameController {
       this.audio.cannon();
       await this.scene.cannonShot(from, to);
     } else {
-      this.audio.move();
+      // 把兵种传下去, 让战象踩地和骑兵马蹄听起来不一样。
+      // 原来这里不传参, 所有兵种共用一套走子音效。
+      this.audio.move(attackKind);
     }
 
     const attackDelay = isCannon && isCapture ? 0 : 95;
@@ -302,6 +304,11 @@ export class GameController {
     }
     if (captured) {
       this.captures[oppositeSide(movingPiece.side)].push(captured);
+      // 吃子让配乐紧张起来: 每吃一子抬一档, 到 1.0 封顶。
+      // 用棋子总数反推已吃数量, 比维护一个计数器更不容易和悔棋/重开失同步。
+      const totalAlive = this.state.pieces.length;
+      const eaten = Math.max(0, 32 - totalAlive);
+      this.audio.setMusicIntensity?.(0.6 + eaten * 0.045);
       await this.scene.defeatActor(captured.id);
     }
 
@@ -375,6 +382,8 @@ export class GameController {
 
     if (status.inCheck) {
       this.audio.check();
+      // 将军是全局最紧张的时刻, 直接把配乐推到满
+      this.audio.setMusicIntensity?.(1);
       this.scene.showCheck([this.state.turn]);
       this.ui.renderTurn(this.state.turn, "将帅受危，必须解围");
       this.ui.showToast("将军");
