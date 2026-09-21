@@ -961,6 +961,26 @@ export class GameScene {
     // 结果所有棋子一到移动就摆攻击姿势, 走路的 clip 从来没被用过。
     if (!options.noWalk) this.playMove(piece, { seconds: duration });
 
+    // 按体量扬尘。
+    //
+    // 之前走子完全没有视觉反馈, 战象和步兵一样"滑"过棋盘。
+    // 权重按各兵种的体格给: 战象最重(1.0), 军师最轻(0.12),
+    // 差别体现在尘团数量、尺寸和浓度上 —— 步兵只有淡淡几缕,
+    // 战象则是一路碾起明显的土雾。
+    const dustWeightByType = {
+      [PIECE_TYPES.ELEPHANT]: 1.0,
+      [PIECE_TYPES.CHARIOT]: 0.82,
+      [PIECE_TYPES.CANNON]: 0.7,
+      [PIECE_TYPES.HORSE]: 0.55,
+      [PIECE_TYPES.GENERAL]: 0.42,
+      [PIECE_TYPES.SOLDIER]: 0.26,
+      [PIECE_TYPES.ADVISOR]: 0.12,
+    };
+    if (!options.noDust) {
+      const weight = dustWeightByType[actor.piece.type] ?? 0.3;
+      this.effects?.moveDust(start, end, weight);
+    }
+
     return new Promise((resolve) => {
       let settled = false;
       let guard = 0;

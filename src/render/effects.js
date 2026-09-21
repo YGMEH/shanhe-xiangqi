@@ -360,6 +360,103 @@ export class EffectsSystem {
     });
   }
 
+  /**
+   * 移动扬尘: 重单位走过时碾起的一串尘土。
+   *
+   * 为什么需要: animateMove 之前不产生任何特效 —— 战象和步兵一样
+   * "滑"过棋盘, 没有体量感。而现实里 3.85 米高的大象走过去必然扬起尘土。
+   *
+   * 做法是在整段位移的路线上按固定间隔撒若干团尘, 而不是只在一个点冒一次:
+   * 单点扬尘看起来像"放了个屁", 沿路径的一串才读得出"走过去了"。
+   * 位置由 duration 决定 —— 尘土要跟着棋子移动的节奏依次出现,
+   * 不能一次性全冒出来。
+   *
+   * @param start  起点(世界坐标)
+   * @param end    终点(世界坐标)
+   * @param weight 0~1, 单位重量。决定尘团数量、大小和扩散范围
+   */
+  moveDust(start, end, weight = 0.3) {
+    // 尘团数量与重量成正比: 步兵 3 团, 战象 9 团
+    const puffs = Math.max(2, Math.round(2 + weight * 8));
+    // 单团尺寸也跟着重量走
+    const size = 0.5 + weight * 1.5;
+    // 扬尘的土色。第一版用 0x9a8a70 配 0.46 的不透明度, 结果 9 团尘
+    // 叠在一起变成一片刺眼的白色, 看起来像雪或烟幕而不是土。
+    // 现在压暗到接近地面色, 并大幅降低单团浓度 —— 靠数量叠加出体积感,
+    // 而不是靠每一团的亮度。
+    const color = weight > 0.6 ? 0x6d6152 : 0x7a6f5e;
+    const alpha = 0.10 + weight * 0.16;
+
+    for (let i = 0; i < puffs; i += 1) {
+      // 沿路径均匀分布, 并加一点横向抖动避免排成一条直线
+      const f = puffs === 1 ? 0.5 : i / (puffs - 1);
+      const at = start.clone().lerp(end, f);
+      at.x += (Math.random() - 0.5) * 0.34;
+      at.z += (Math.random() - 0.5) * 0.34;
+      at.y += 0.06;
+
+      const count = 10;
+      const geometry = new THREE.BufferGeometry();
+      const positions = new Float32Array(count * 3);
+      const velocities = [];
+      for (let k = 0; k < count; k += 1) {
+        const angle = Math.random() * Math.PI * 2;
+        const radius = Math.random() * 0.22;
+        positions[k * 3] = Math.cos(angle) * radius;
+        positions[k * 3 + 1] = Math.random() * 0.1;
+        positions[k * 3 + 2] = Math.sin(angle) * radius;
+        velocities.push(
+          new THREE.Vector3(
+            Math.cos(angle) * (0.3 + Math.random() * 0.5),
+            // 扬尘要往上飘, 但比爆炸的尘土慢得多
+            0.28 + Math.random() * 0.4,
+            Math.sin(angle) * (0.3 + Math.random() * 0.5)
+          )
+        );
+      }
+      geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+      const material = new THREE.PointsMaterial({
+        color,
+        size: size * 0.5,
+        transparent: true,
+        opacity: alpha,
+        depthWrite: false,
+      });
+      const points = new THREE.Points(geometry, material);
+      points.position.copy(at);
+      // 先不加入场景, 等轮到它出现时再加 —— 这样尘土是"依次"扬起的
+      const delay = f * 0.5;
+      this.scene.add(points);
+      points.visible = false;
+
+      this.add({
+        elapsed: -delay,
+        duration: 0.9,
+        update: (t) => {
+          // t 为负表示还没到出现时机
+          if (t < 0) return;
+          points.visible = true;
+          const array = geometry.attributes.position.array;
+          for (let k = 0; k < count; k += 1) {
+            array[k * 3] += velocities[k].x * 0.016;
+            array[k * 3 + 1] += velocities[k].y * 0.016;
+            array[k * 3 + 2] += velocities[k].z * 0.016;
+            velocities[k].y -= 0.018 * 0.016;
+          }
+          geometry.attributes.position.needsUpdate = true;
+          material.opacity = (1 - t) * alpha;
+          // 尘土慢慢扩散变淡
+          material.size = size * (0.5 + t * 0.9);
+        },
+        dispose: () => {
+          this.scene.remove(points);
+          geometry.dispose();
+          material.dispose();
+        },
+      });
+    }
+  }
+
   moveTrail(start, end, color) {
     const points = [start.clone(), end.clone()];
     points[0].y += 0.12;
