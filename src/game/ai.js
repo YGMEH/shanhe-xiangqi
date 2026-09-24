@@ -1,6 +1,7 @@
 import {
   PIECE_TYPES,
   PIECE_VALUES,
+  SIDES,
   crossedRiver,
   oppositeSide,
 } from "./constants.js";
@@ -96,18 +97,30 @@ function searchRoot(state, side, ordered, depth, search, noise) {
   for (const move of ordered) {
     checkSearchDeadline(search);
     const record = state.moveInPlace(move.pieceId, move.x, move.y);
+    // 记录进入这一步之前的真实回合, 还原时要用它, 不能硬写回 side ——
+    // 调用方传入的 state.turn 未必等于正在搜索的一方。
+    const turnBefore = state.turn;
     state.turn = oppositeSide(side);
-    const searchScore = -negamax(
-      state,
-      depth - 1,
-      -Infinity,
-      -alphaWindow,
-      oppositeSide(side),
-      1,
-      search
-    );
-    state.turn = side;
-    state.undoMove(record);
+    // 搜索超时是抛异常退出的。以前这里直接让 SearchTimeout 冒出去,
+    // undoMove 被跳过, 棋盘被永久留在搜索的中间状态:
+    // 之后 AI 自己的着法会被 isMoveLegal 判为非法(提示"该落点不符合行棋规则"),
+    // 玩家一方的点击也会因为 turn/棋子坐标错乱而全部失效。
+    // 用 try/finally 保证无论正常返回还是超时中断, 都把这一步还原干净。
+    let searchScore;
+    try {
+      searchScore = -negamax(
+        state,
+        depth - 1,
+        -Infinity,
+        -alphaWindow,
+        oppositeSide(side),
+        1,
+        search
+      );
+    } finally {
+      state.turn = turnBefore;
+      state.undoMove(record);
+    }
     const score =
       searchScore +
       scoreMoveShallow(state, move, side) * 0.08 +
@@ -127,10 +140,15 @@ export function reviewPosition(state, side) {
   const scored = moves
     .map((move) => {
       const record = state.moveInPlace(move.pieceId, move.x, move.y);
+      const turnBefore = state.turn;
       state.turn = oppositeSide(side);
-      const score = -evaluate(state, oppositeSide(side)) * 0.08;
-      state.turn = side;
-      state.undoMove(record);
+      let score;
+      try {
+        score = -evaluate(state, oppositeSide(side)) * 0.08;
+      } finally {
+        state.turn = turnBefore;
+        state.undoMove(record);
+      }
       return {
         move,
         score: score + scoreMoveShallow(state, move, side),
@@ -162,18 +180,24 @@ function negamax(state, depth, alpha, beta, side, ply, search) {
 
   for (const move of ordered.slice(0, depth >= 2 ? 24 : 16)) {
     const record = state.moveInPlace(move.pieceId, move.x, move.y);
+    const turnBefore = state.turn;
     state.turn = oppositeSide(side);
-    const score = -negamax(
-      state,
-      depth - 1,
-      -beta,
-      -alpha,
-      oppositeSide(side),
-      ply + 1,
-      search
-    );
-    state.turn = side;
-    state.undoMove(record);
+    // 同 searchRoot: 超时必须走 finally 还原, 否则棋盘会被搜索污染。
+    let score;
+    try {
+      score = -negamax(
+        state,
+        depth - 1,
+        -beta,
+        -alpha,
+        oppositeSide(side),
+        ply + 1,
+        search
+      );
+    } finally {
+      state.turn = turnBefore;
+      state.undoMove(record);
+    }
     if (score > best) best = score;
     if (score > alpha) alpha = score;
     if (alpha >= beta) break;
@@ -217,9 +241,15 @@ function materialScore(state, perspective) {
   for (const piece of state.pieces) {
     const sign = piece.side === perspective ? 1 : -1;
     const table = PIECE_POSITION[piece.type];
+    // 位置表是按红方视角编写的(红方底线在 y=9, 表中第一行对应红方底线)。
+    // 黑方必须沿河镜像, 否则黑兵的"向前推进"会被当成后退而扣分 ——
+    // 实测 AI 会把过河卒往回开, 也会让黑方车马炮往自家底线缩。
+    const row = piece.side === SIDES.RED ? 9 - piece.y : piece.y;
+    const safeRow = Math.max(0, Math.min(9, row));
+    const safeX = Math.max(0, Math.min(8, piece.x));
     const positional = table
-      ? table[Math.max(0, Math.min(9, 9 - piece.y))][piece.x]
-      : CENTRAL_BONUS[Math.max(0, Math.min(9, 9 - piece.y))][piece.x];
+      ? table[safeRow][safeX]
+      : CENTRAL_BONUS[safeRow][safeX];
     score += sign * (PIECE_VALUES[piece.type] + positional * 0.65);
   }
   return score;

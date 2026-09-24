@@ -6,6 +6,7 @@ import { GameScene } from "./render/scene.js";
 import { GameUI } from "./ui/ui.js";
 import { SIDES } from "./game/constants.js";
 import { clearGame, hasSavedGame, loadGame } from "./game/save.js";
+import { createPointerClickTracker } from "./input/pointer.js";
 import {
   createCampaignProgress,
   evaluateCampaign,
@@ -323,33 +324,33 @@ function restartGame() {
 }
 
 function bindCanvasInput() {
-  let down = null;
-  let moved = false;
+  const pointer = createPointerClickTracker();
 
+  // 只把「位移」当作拖动判据: 慢帧设备上 performance.now() 跨度会被放大到
+  // 数秒, 曾导致正常点击(按住 300ms)被判成超时直接丢弃。
   canvas.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0) return;
-    down = { x: event.clientX, y: event.clientY, time: performance.now() };
-    moved = false;
+    if (!pointer.start(event)) return;
+    canvas.setPointerCapture?.(event.pointerId);
   });
 
-  canvas.addEventListener("pointermove", (event) => {
-    if (!down) return;
-    if (Math.hypot(event.clientX - down.x, event.clientY - down.y) > 7) {
-      moved = true;
-    }
-  });
+  canvas.addEventListener("pointermove", (event) => pointer.move(event));
 
   canvas.addEventListener("pointerup", async (event) => {
-    if (!down || event.button !== 0 || moved) {
-      down = null;
-      return;
-    }
-    const elapsed = performance.now() - down.time;
-    down = null;
-    if (elapsed > 650 || !controller || !gameStarted) return;
+    const result = pointer.end(event);
+    if (!result.handled) return;
+    canvas.releasePointerCapture?.(event.pointerId);
+    if (!result.clicked) return;
+    if (!controller || !gameStarted) return;
     const square = scene.squareAtPointer(event);
     if (!square) return;
     await controller.squareClicked(square.x, square.y);
+  });
+
+  canvas.addEventListener("pointercancel", (event) => {
+    pointer.cancel(event);
+  });
+  canvas.addEventListener("lostpointercapture", (event) => {
+    pointer.cancel(event);
   });
 
   canvas.addEventListener("dblclick", (event) => {

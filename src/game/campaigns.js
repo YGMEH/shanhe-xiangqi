@@ -187,10 +187,11 @@ export function getNextCampaignLevel(levelId) {
 export function evaluateCampaign(state, controller, level) {
   const history = controller.moveHistory;
   const plies = history.length;
-  const capturesByPlayer = controller.captures[
-    controller.aiSide
-  ]?.length ?? 0;
-  const losses = controller.captures[controller.playerSide]?.length ?? 0;
+  // captures[side] = 该方俘获的战利品(见 controller.runMove),
+  // 所以玩家缴获在 captures[playerSide], 玩家损失在 captures[aiSide]。
+  const capturesByPlayer =
+    controller.captures[controller.playerSide]?.length ?? 0;
+  const losses = controller.captures[controller.aiSide]?.length ?? 0;
   const stars = [];
 
   switch (level.objectiveType) {
@@ -205,7 +206,7 @@ export function evaluateCampaign(state, controller, level) {
       return { achieved, stars, progress: Math.max(0, advantage / level.targetScore) };
     }
     case "capture-types": {
-      const captured = controller.captures[controller.aiSide] ?? [];
+      const captured = controller.captures[controller.playerSide] ?? [];
       const count = captured.filter((piece) =>
         level.captureTypes.includes(piece.type)
       ).length;

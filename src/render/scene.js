@@ -25,12 +25,18 @@ import {
   createBoardVisuals,
   installTerrainHeightSampler,
   nodePosition,
+  showLastMove,
   showMoveMarkers,
 } from "./board-visuals.js";
 import { EffectsSystem } from "./effects.js";
 import { cloneModel } from "./asset-loader.js";
+import { nearestNodeOnScreen, resolveSquarePick, squareKey } from "./pick.js";
 
 installTerrainHeightSampler(terrainHeightAt);
+
+// 射线什么都没打到(点到了天空/画面外)时, 指针到最近交叉点的距离超过"局部
+// 格距的这么多倍"就认为玩家没在点棋盘, 避免误触。
+const BOARD_MISS_RATIO = 0.72;
 
 export class GameScene {
   constructor(canvas, materials, options = {}) {
@@ -39,8 +45,10 @@ export class GameScene {
     this.reducedMotion = options.reducedMotion ?? false;
     this.quality = options.quality ?? "high";
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x849b95);
-    this.scene.fog = new THREE.FogExp2(0x93a89f, 0.0115);
+    this.scene.background = new THREE.Color(0x8c7a6a);
+    // 雾色跟随黄昏天光 (暖灰), 而不是冷青绿: 远景收敛色必须和天空背景板同族,
+    // 否则地平线会出现一条冷暖分界。密度保持原值, 只改色相。
+    this.scene.fog = new THREE.FogExp2(0x9c8b7a, 0.0115);
 
     this.renderer = new THREE.WebGLRenderer({
       canvas,
@@ -123,6 +131,7 @@ export class GameScene {
     this.sceneTime = 0;
 
     this.createSky();
+    this.applyBackdrop();
     this.setupLights();
     this.buildWorld();
     this.bindEvents();
@@ -162,6 +171,44 @@ export class GameScene {
     this.sky = new THREE.Mesh(new THREE.SphereGeometry(72, 40, 24), skyMaterial);
     this.sky.name = "sky-dome";
     this.scene.add(this.sky);
+  }
+
+  /**
+   * 远景环境板: public/assets/art/valley-backdrop.webp (4096x2048, 2:1)。
+   *
+   * 按 equirectangular 全景图贴到场景 background 上。
+   * 为什么用 2:1: 这正是 equirect 全景图的标准比例, 贴图不会被拉伸。
+   * 加载失败时保留程序化天空穹顶, 不影响任何现有表现。
+   * 注意: Vite dev server 对不存在的路径会返回 200 + index.html,
+   * 所以必须查 Content-Type 判断文件到底在不在。
+   */
+  applyBackdrop() {
+    const url = "assets/art/valley-backdrop.webp";
+    fetch(url, { method: "HEAD" })
+      .then((response) => {
+        if (!response.ok) return false;
+        const type = (response.headers.get("content-type") || "").toLowerCase();
+        return !type.includes("text/html");
+      })
+      .then((available) => {
+        if (!available) return;
+        new THREE.TextureLoader().load(
+          url,
+          (texture) => {
+            texture.mapping = THREE.EquirectangularReflectionMapping;
+            texture.colorSpace = THREE.SRGBColorSpace;
+            this.scene.background = texture;
+            // 程序化穹顶会遮住背景贴图, 成功加载后隐藏它。
+            if (this.sky) this.sky.visible = false;
+            this.backdropTexture = texture;
+          },
+          undefined,
+          () => {
+            // 贴图解码失败: 继续用程序化天空。
+          }
+        );
+      })
+      .catch(() => {});
   }
 
   /**
@@ -375,6 +422,7 @@ export class GameScene {
 
   attachGame(game) {
     this.game = game;
+    showLastMove(this.boardVisuals, game.lastMove);
   }
 
   syncBoard(state, options = {}) {
@@ -402,25 +450,36 @@ export class GameScene {
       }
       actor.baseHeight = height;
     });
+    if (this.game) showLastMove(this.boardVisuals, this.game.lastMove);
+  }
+
+  setLastMove(lastMove) {
+    showLastMove(this.boardVisuals, lastMove);
   }
 
   async attachExternalModel(actor, piece, attempt = 0) {
     const key = piece.side === SIDES.BLACK ? `${piece.type}-black` : piece.type;
     const model = await cloneModel(key);
     if (actor.defeating) return;
-    // actor 可能是"上一次 syncBoard 建好、这一次才轮到挂模型"的状态。
-    // 早先这里直接 return, 结果是棋子既没有外部模型、也没有程序化模型
-    // (创建时用了 deferSculpt: true), 变成隐形棋子 —— 实测表现为
-    // "红方 5 个老兵全都没有模型, 黑方 5 个正常"。
-    // 现在改成: 还没入场景就稍后重试, 重试若干次仍不行才退回程序化模型,
-    // 保证任何情况下棋子都看得见。
-    if (!actor.group.parent) {
+    // cloneModel 是异步的: await 返回时这枚 actor 可能已经被后续操作
+    // (悔棋、重开、残局换阵、吃子退场)从棋盘移除了。
+    // 早先这里毫无防护, 旧 actor 会被重新加回 pieceLayer,
+    // 表现为"悔棋后被吃的棋子又站回棋盘"(虚影)。
+    // 现在的规则: 只要不是"新创建、还没轮到入场景"的等待态, 就直接收工。
+    if (actor.group.parent) {
+      if (this.actors.get(actor.piece?.id) !== actor) return;
+    } else if (this.actors.has(actor.piece?.id)) {
+      // 还在登记但没入场景: 还没轮到挂模型, 稍后重试; 重试若干次仍不行
+      // 就退回程序化模型, 保证任何情况下棋子都看得见。
       if (attempt < 12) {
         window.setTimeout(() => {
           this.attachExternalModel(actor, piece, attempt + 1);
         }, 60);
         return;
       }
+    } else {
+      // 既不在场景也不在登记册: 这枚 actor 已经被替换, 不再管它。
+      return;
     }
     if (!model || !model.animations?.length) {
       actor.buildSculpt();
@@ -435,7 +494,10 @@ export class GameScene {
         child.receiveShadow = true;
       }
     });
-    scene.rotation.y = Math.PI;
+    // GLB 统一以 +Z 为模型正面。PieceActor 已按阵营设置整体朝向:
+    // 红方在棋盘南侧朝北(-Z), 黑方在北侧朝南(+Z)。
+    // 这里不能再额外旋转 Math.PI, 否则红黑两方都会背向对手。
+    scene.rotation.y = 0;
 
     // 按"目标高度 / 模型原始高度"反推缩放, 而不是给每个兵种手填系数。
     //
@@ -785,10 +847,20 @@ export class GameScene {
     this.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
   }
 
+  /**
+   * 把鼠标/触摸位置解析成棋盘格点。
+   *
+   * 单一线索都不够用:
+   *   - 只看屏幕投影最近点: 棋子是立体模型, 上半身会盖住相邻格点, 实测点
+   *     棋子身体时 32 枚里有 23 枚被判到错误的格;
+   *   - 只看 3D 射线: 前排高模型(旗杆、长枪、战车)会盖住后排空格, 实测 90
+   *     个格点里有 20 个"点空格却选中前排棋子"。
+   *
+   * 所以两条线索都算出来, 交给 resolveSquarePick 按棋局语义裁决(见 pick.js)。
+   * 注意投影线索这里不做距离截断: 被前排模型遮住的落点本来就离指针很远,
+   * 提前截断会把需要的信息丢掉。是否算"点到棋盘"由这里统一把关。
+   */
   raycast() {
-    const screenSquare = this.squareFromScreen();
-    if (screenSquare) return screenSquare;
-
     this.raycaster.setFromCamera(this.pointer, this.camera);
     const pickables = [this.terrain];
     this.actors.forEach((actor) => {
@@ -796,18 +868,50 @@ export class GameScene {
       pickables.push(actor.group);
     });
     const intersects = this.raycaster.intersectObjects(pickables, true);
-    if (!intersects.length) return null;
-    const hit = intersects[0];
-    const actor = findActorFromObject(hit.object);
-    if (actor) {
-      return { x: actor.piece.x, y: actor.piece.y };
+
+    let raySquare = null;
+    if (intersects.length) {
+      const actor = findActorFromObject(intersects[0].object);
+      if (actor?.piece) raySquare = { x: actor.piece.x, y: actor.piece.y };
     }
+
+    const aim = this.squareFromScreen();
+    const aimRatio =
+      aim && Number.isFinite(aim.spacing) && aim.spacing > 0
+        ? aim.distance / aim.spacing
+        : Infinity;
+    const legalTargets = this.legalTargetKeys();
+    const resolved = resolveSquarePick({
+      raySquare,
+      aimSquare: aim?.square ?? null,
+      aimRatio,
+      rayRatio: raySquare ? this.screenRatioTo(raySquare) : Infinity,
+      legalTargets,
+      aimedPieceSide:
+        aim?.square && this.game?.state
+          ? this.game.state.pieceAt(aim.square.x, aim.square.y)?.side ?? null
+          : null,
+      turnSide: this.game?.state?.turn ?? null,
+    });
+    if (resolved) {
+      const resolvedKey = squareKey(resolved.x, resolved.y);
+      // 打在棋子身上: 这是"点到了看得见的东西", 直接认。
+      if (raySquare) return resolved;
+      // 只打到地面: 要求指针足够接近某个交叉点(或正好是当前选中棋子的
+      // 合法落点), 否则就是把鼠标停在两格之间的空地上, 不该落子。
+      if (aimRatio <= BOARD_MISS_RATIO || legalTargets?.has?.(resolvedKey)) {
+        return resolved;
+      }
+    }
+
+    // 兜底: 点到两枚棋子之间的空地时, 用地形命中点找最近的交叉点。
+    // 只有真的打到地面才接受, 避免点击画面外的天空也移动棋子。
+    const hit = intersects[0];
+    if (!hit) return null;
     const point = hit.point;
     let nearest = null;
-    const nearestDistanceLimit = Math.max(
-      BOARD_SPACING.x,
-      BOARD_SPACING.y
-    ) * 0.62;
+    const nearestDistanceLimit =
+      Math.max(BOARD_SPACING.x, BOARD_SPACING.y) * 0.62;
     let nearestDistance = nearestDistanceLimit;
     for (let y = 0; y < BOARD_ROWS; y += 1) {
       for (let x = 0; x < BOARD_COLUMNS; x += 1) {
@@ -822,10 +926,36 @@ export class GameScene {
     return nearest;
   }
 
+  /** 当前选中棋子的合法落点集合(用于拾取消歧, 见 pick.js)。 */
+  legalTargetKeys() {
+    const moves = this.game?.selectedMoves;
+    if (!Array.isArray(moves) || moves.length === 0) return null;
+    return new Set(moves.map((move) => `${move.x},${move.y}`));
+  }
+
+  /** 某格交叉点到指针的屏幕像素距离, 再除以该处的局部格距。 */
+  screenRatioTo(square) {
+    const spacing = this._screenSpacingBySquare?.get(squareKey(square.x, square.y));
+    if (!spacing || !Number.isFinite(spacing) || spacing <= 0) return Infinity;
+    return this.screenDistanceTo(square) / spacing;
+  }
+
+  /** 某格交叉点到指针的屏幕像素距离(查缓存, 不重算投影)。 */
+  screenDistanceTo(square) {
+    const cached = this._screenProjectionBySquare?.get(squareKey(square.x, square.y));
+    if (!cached) return Infinity;
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+    const pointerX = ((this.pointer.x + 1) / 2) * width;
+    const pointerY = ((1 - this.pointer.y) / 2) * height;
+    return Math.hypot(cached.px - pointerX, cached.py - pointerY);
+  }
+
+  /**
+   * 交叉点的屏幕投影缓存。返回最近的一个交叉点, 但不做距离截断;
+   * 调用方按 distance / spacing 自行判断"这一击是多近瞄着某个交叉点"。
+   */
   squareFromScreen() {
-    if (!this._screenProjection) {
-      this._screenProjection = [];
-    }
     const width = window.innerWidth;
     const height = window.innerHeight;
     const pointerX = ((this.pointer.x + 1) / 2) * width;
@@ -834,45 +964,55 @@ export class GameScene {
     if (this._screenCacheKey !== cacheKey) {
       this.camera.updateMatrixWorld(true);
       const projected = [];
+      const bySquare = new Map();
       for (let y = 0; y < BOARD_ROWS; y += 1) {
         for (let x = 0; x < BOARD_COLUMNS; x += 1) {
           const world = nodePosition(x, y, 0.15);
           const point = world.clone().project(this.camera);
-          projected.push({
+          const entry = {
             x,
             y,
             px: ((point.x + 1) / 2) * width,
             py: ((1 - point.y) / 2) * height,
             behind: point.z > 1,
-          });
+          };
+          projected.push(entry);
+          bySquare.set(squareKey(x, y), entry);
         }
       }
+      // 每个交叉点到最近另一个交叉点的屏幕间距: 把"点击偏离"归一化成与
+      // 镜头远近无关的比例, 一套阈值就能通吃远景和近景。
+      const spacingBySquare = new Map();
+      for (const entry of projected) {
+        if (entry.behind) continue;
+        let spacing = Infinity;
+        for (const other of projected) {
+          if (other.behind || other === entry) continue;
+          const distance = Math.hypot(other.px - entry.px, other.py - entry.py);
+          if (distance > 1 && distance < spacing) spacing = distance;
+        }
+        spacingBySquare.set(squareKey(entry.x, entry.y), spacing);
+      }
       this._screenProjection = projected;
+      this._screenProjectionBySquare = bySquare;
+      this._screenSpacingBySquare = spacingBySquare;
       this._screenCacheKey = cacheKey;
     }
 
-    let nearest = null;
-    let nearestDistance = Infinity;
-    let nearestNeighbor = Infinity;
-    for (const entry of this._screenProjection) {
-      if (entry.behind) continue;
-      const distance = Math.hypot(entry.px - pointerX, entry.py - pointerY);
-      if (distance < nearestDistance) {
-        nearestDistance = distance;
-        nearest = entry;
-      }
-    }
+    const nearest = nearestNodeOnScreen(
+      this._screenProjection,
+      pointerX,
+      pointerY
+    );
     if (!nearest) return null;
-    for (const entry of this._screenProjection) {
-      if (entry.behind || entry === nearest) continue;
-      const distance = Math.hypot(entry.px - nearest.px, entry.py - nearest.py);
-      if (distance > 1 && distance < nearestNeighbor) nearestNeighbor = distance;
-    }
-    const reach = Number.isFinite(nearestNeighbor)
-      ? Math.max(24, nearestNeighbor * 0.66)
-      : 48;
-    if (nearestDistance > reach) return null;
-    return { x: nearest.x, y: nearest.y };
+    return {
+      square: nearest.square,
+      distance: nearest.distance,
+      spacing:
+        this._screenSpacingBySquare?.get(
+          squareKey(nearest.square.x, nearest.square.y)
+        ) ?? nearest.spacing,
+    };
   }
 
   hoverAtPointer(event) {

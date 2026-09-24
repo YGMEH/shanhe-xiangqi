@@ -17,6 +17,10 @@ export function createBoardVisuals(materials) {
     depthWrite: false,
     side: THREE.DoubleSide,
     toneMapped: false,
+    // 贴地贴片靠 GPU 抬深度, 而不是把几何整体抬高 —— 几何抬高会制造阴影缝。
+    polygonOffset: true,
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -2,
   });
   const secondaryLineMaterial = new THREE.MeshBasicMaterial({
     color: 0x7d6a45,
@@ -25,6 +29,9 @@ export function createBoardVisuals(materials) {
     depthWrite: false,
     side: THREE.DoubleSide,
     toneMapped: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -2,
   });
 
   const nodes = [];
@@ -97,6 +104,9 @@ export function createBoardVisuals(materials) {
     depthWrite: false,
     side: THREE.DoubleSide,
     toneMapped: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -2,
   });
   const nodeMarkers = new THREE.InstancedMesh(nodeGeometry, nodeMaterial, nodes.length);
   nodeMarkers.name = "board-nodes";
@@ -197,6 +207,96 @@ export function createBoardVisuals(materials) {
   selectionRing.renderOrder = 3;
   group.add(selectionRing);
 
+  // 上一步的起点/终点持续保留，避免玩家在 AI 动完后找不到刚才发生了什么。
+  //
+  // 之前起点只是一个半透明细圈、终点是一个红圈，转成俯视/远景时几乎看不见，
+  // 也分不清"哪边是出发、哪边是到达"。现在改成:
+  //   起点 = 断开的虚线环(编码"已经离开这里")
+  //   终点 = 实心粗环 + 圆心亮点(编码"落在这里")
+  // 颜色跟行棋方走(红方暖橙 / 黑方冷青)，并在原地上方立一盏小光柱，
+  // 俯视时不会因为地形遮挡而消失。
+  const LAST_MOVE_COLORS = {
+    red: { from: 0xffb066, to: 0xff6d4a, beam: 0xff8a5c },
+    black: { from: 0x8fd4de, to: 0x4fc3d9, beam: 0x66c2d6 },
+  };
+  const lastMoveFrom = new THREE.Mesh(
+    new THREE.RingGeometry(0.5, 0.58, 40, 1, 0, Math.PI * 1.55),
+    new THREE.MeshBasicMaterial({
+      color: LAST_MOVE_COLORS.red.from,
+      transparent: true,
+      opacity: 0.8,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+    })
+  );
+  const lastMoveTo = new THREE.Mesh(
+    new THREE.RingGeometry(0.6, 0.74, 44),
+    new THREE.MeshBasicMaterial({
+      color: LAST_MOVE_COLORS.red.to,
+      transparent: true,
+      opacity: 0.96,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+    })
+  );
+  const lastMoveFromBeam = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.06, 0.11, 0.62, 12, 1, true),
+    new THREE.MeshBasicMaterial({
+      color: LAST_MOVE_COLORS.red.beam,
+      transparent: true,
+      opacity: 0.34,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+    })
+  );
+  const lastMoveToBeam = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.1, 0.17, 0.86, 14, 1, true),
+    new THREE.MeshBasicMaterial({
+      color: LAST_MOVE_COLORS.red.beam,
+      transparent: true,
+      opacity: 0.42,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+    })
+  );
+  [lastMoveFrom, lastMoveTo, lastMoveFromBeam, lastMoveToBeam].forEach(
+    (marker) => {
+      marker.visible = false;
+      marker.renderOrder = 3;
+      group.add(marker);
+    }
+  );
+  lastMoveFrom.rotation.x = -Math.PI / 2;
+  lastMoveTo.rotation.x = -Math.PI / 2;
+
+  // 两军阵地标识：即使镜头旋转到侧面，也能快速分辨棋盘南北两端。
+  const sideMarkers = [
+    { side: SIDES.RED, x: 4, y: 9, color: 0xd8473f },
+    { side: SIDES.BLACK, x: 4, y: 0, color: 0x69b8c2 },
+  ].map(({ side, x, y, color }) => {
+    const marker = new THREE.Mesh(
+      new THREE.RingGeometry(0.72, 0.8, 32),
+      new THREE.MeshBasicMaterial({
+        color,
+        transparent: true,
+        opacity: 0.58,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        toneMapped: false,
+      })
+    );
+    marker.name = `side-marker-${side}`;
+    marker.rotation.x = -Math.PI / 2;
+    marker.position.copy(nodePosition(x, y, 0.045));
+    marker.renderOrder = 2;
+    group.add(marker);
+    return marker;
+  });
+
   const warningRings = [];
   for (let i = 0; i < 2; i += 1) {
     const warningRing = new THREE.Mesh(
@@ -221,6 +321,12 @@ export function createBoardVisuals(materials) {
     group,
     moveMarker,
     captureMarker,
+    lastMoveFrom,
+    lastMoveTo,
+    lastMoveFromBeam,
+    lastMoveToBeam,
+    lastMoveColors: LAST_MOVE_COLORS,
+    sideMarkers,
     targetMarkers,
     selectionRing,
     warningRings,
@@ -232,6 +338,11 @@ export function createBoardVisuals(materials) {
       captureMarker.rotation.y = -time * 0.35;
       captureMarker.scale.setScalar(0.98 + Math.sin(time * 4.1) * 0.06);
       selectionRing.scale.setScalar(0.96 + Math.sin(time * 3.6) * 0.055);
+      lastMoveFrom.scale.setScalar(0.97 + Math.sin(time * 2.8) * 0.03);
+      lastMoveTo.scale.setScalar(0.96 + Math.sin(time * 3.2) * 0.06);
+      lastMoveFromBeam.material.opacity = 0.24 + Math.sin(time * 2.4) * 0.09;
+      lastMoveToBeam.material.opacity = 0.3 + Math.sin(time * 2.9) * 0.13;
+      lastMoveToBeam.rotation.y = time * 0.5;
       warningRings.forEach((warningRing) => {
         warningRing.rotation.y = time * 0.7;
         warningRing.material.opacity = 0.62 + Math.sin(time * 7) * 0.28;
@@ -286,6 +397,38 @@ export function clearMoveMarkers(visuals) {
   visuals.targetMarkers.forEach((marker) => (marker.visible = false));
 }
 
+export function showLastMove(visuals, lastMove) {
+  const hide = () => {
+    visuals.lastMoveFrom.visible = false;
+    visuals.lastMoveTo.visible = false;
+    visuals.lastMoveFromBeam.visible = false;
+    visuals.lastMoveToBeam.visible = false;
+  };
+  if (!lastMove?.from || !lastMove?.to) {
+    hide();
+    return;
+  }
+  // 旧存档没有 side 字段, 默认按红方暖色渲染, 不影响功能。
+  const colors =
+    visuals.lastMoveColors?.[lastMove.side] ?? visuals.lastMoveColors?.red;
+  if (colors) {
+    visuals.lastMoveFrom.material.color.setHex(colors.from);
+    visuals.lastMoveTo.material.color.setHex(colors.to);
+    visuals.lastMoveFromBeam.material.color.setHex(colors.beam);
+    visuals.lastMoveToBeam.material.color.setHex(colors.beam);
+  }
+  const from = nodePosition(lastMove.from.x, lastMove.from.y, 0.09);
+  const to = nodePosition(lastMove.to.x, lastMove.to.y, 0.1);
+  visuals.lastMoveFrom.position.copy(from);
+  visuals.lastMoveTo.position.copy(to);
+  visuals.lastMoveFromBeam.position.set(from.x, from.y + 0.31, from.z);
+  visuals.lastMoveToBeam.position.set(to.x, to.y + 0.43, to.z);
+  visuals.lastMoveFrom.visible = true;
+  visuals.lastMoveTo.visible = true;
+  visuals.lastMoveFromBeam.visible = true;
+  visuals.lastMoveToBeam.visible = true;
+}
+
 export function nodePosition(x, y, offset = 0) {
   const position = boardPosition(x, y);
   return new THREE.Vector3(
@@ -300,6 +443,16 @@ export function nodePosition(x, y, offset = 0) {
  * segment and resampling the height keeps the board lines from floating over
  * slopes, which is what made them read as wire strung above the ground.
  */
+/** 棋盘线的贴地抬升量。
+ *
+ * 历史上这里是 0.035, 而线宽也恰好是 0.035 —— 抬升量等于自身宽度,
+ * 近景低机位必然在贴片下方看到一道阴影缝, 观感就是"浮在地形上没咬进去"。
+ * 实测地形在棋盘范围内高差仅 1.24 米 / 16 米(坡度 7.7%), 线横截面宽度上
+ * 的边缘高差只有 0.9~3.5 毫米, 所以坡度穿透从来不是主因 —— 抬太高才是。
+ * 现在降到线宽的 17%, 深度冲突交给 polygonOffset。
+ */
+const LINE_LIFT = 0.006;
+
 function createGroundRibbon(points, width, material, options = {}) {
   const positions = [];
   const indices = [];
@@ -329,7 +482,11 @@ function createGroundRibbon(points, width, material, options = {}) {
       const t = step / subdivisions;
       const x = THREE.MathUtils.lerp(start.x, end.x, t);
       const z = THREE.MathUtils.lerp(start.z, end.z, t);
-      const y = terrainHeightAtBoardWorld(x, z) + 0.035;
+      // 抬升量 = 线宽的 17%(原来是 100%: 线宽 0.035 就抬 0.035)。
+      // 抬一个自身宽度时, 近景低机位必然在贴片下方看到阴影缝, 观感就是
+      // "浮在地形上"。真正的 z-fighting 交给 material 的 polygonOffset 处理,
+      // 不靠几何抬升。
+      const y = terrainHeightAtBoardWorld(x, z) + LINE_LIFT;
       positions.push(x - normalX, y, z - normalZ);
       positions.push(x + normalX, y, z + normalZ);
     }

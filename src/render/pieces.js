@@ -7,12 +7,27 @@ import {
   capsule,
   cone,
   cylinder,
+  makeFactionBandTexture,
   makeLabelTexture,
   setShadow,
   sphere,
 } from "./model-utils.js";
 
 const TEMP_FORWARD = new THREE.Vector3(0, 0, 1);
+
+// 阵营色带贴图按阵营缓存: 32 颗棋子共用两张 canvas 贴图。
+// 每颗各建一份会白白多吃 32 倍显存, 而纹样只取决于阵营, 没有逐子差异。
+const FACTION_BAND_CACHE = new Map();
+
+function factionBandMaterial(faction, side) {
+  if (!FACTION_BAND_CACHE.has(side)) {
+    const texture = makeFactionBandTexture(side);
+    const material = faction.baseBand.clone();
+    material.map = texture;
+    FACTION_BAND_CACHE.set(side, material);
+  }
+  return FACTION_BAND_CACHE.get(side);
+}
 
 export class PieceActor {
   constructor(piece, materials, options = {}) {
@@ -87,14 +102,30 @@ export class PieceActor {
   buildBase(piece, faction) {
     const base = new THREE.Group();
     base.name = "base";
-    cylinder(base, faction.darkTrim, [0.6, 0.66], 0.12, [0, 0.06, 0], [0, 0, 0], 32);
-    cylinder(base, faction.accent, [0.52, 0.58], 0.1, [0, 0.15, 0], [0, 0, 0], 32);
+    // 底座从下到上: 金属外圈 -> 高饱和阵营色环 -> 漆面圆盘 -> 名牌。
+    // 之前的底座是"青铜/暗铁 + 一个细圈", 在暖黄沙地上红黑双方整体都偏暗,
+    // 远镜头下几乎是同一种颜色。现在把阵营色做成最粗的一圈,
+    // 并把外圈抬起一点做出立体台阶, 逆光/俯视也能一眼分清阵营。
+    cylinder(base, faction.darkTrim, [0.62, 0.68], 0.1, [0, 0.05, 0], [0, 0, 0], 32);
+    // 阵营色环: 用程序化回纹贴图替代纯色 (按阵营缓存的共享材质)。
+    // 侧壁是圆柱的弯曲面, 回纹贴上去后近景有细节; 纹样明度差只有 0.34,
+    // 缩到几个像素时会糊成一条纯色带, 远景阵营辨识度不受影响。
+    cylinder(
+      base,
+      factionBandMaterial(faction, piece.side),
+      [0.6, 0.62],
+      0.11,
+      [0, 0.155, 0],
+      [0, 0, 0],
+      32
+    );
+    cylinder(base, faction.accent, [0.5, 0.57], 0.1, [0, 0.255, 0], [0, 0, 0], 32);
     const ring = new THREE.Mesh(
-      new THREE.TorusGeometry(0.47, 0.03, 8, 36),
+      new THREE.TorusGeometry(0.475, 0.035, 8, 40),
       faction.trim
     );
     ring.rotation.x = Math.PI / 2;
-    ring.position.y = 0.21;
+    ring.position.y = 0.31;
     ring.castShadow = true;
     base.add(ring);
 
@@ -111,10 +142,10 @@ export class PieceActor {
     const label = new THREE.Mesh(new THREE.CircleGeometry(0.4, 36), labelMaterial);
     label.rotation.x = -Math.PI / 2;
     label.rotation.z = 0;
-    label.position.y = 0.215;
+    label.position.y = 0.315;
     label.renderOrder = 2;
     base.add(label);
-    base.scale.setScalar(0.94);
+    base.scale.setScalar(0.98);
     this.group.add(base);
     this.rig.base = base;
 
@@ -160,6 +191,44 @@ export class PieceActor {
     [-0.43, 0.43].forEach((x) => {
       box(model, faction.darkTrim, [0.2, 0.16, 0.22], [x, 0.26, 0.08]);
       box(model, faction.trim, [0.22, 0.06, 0.24], [x, 0.34, 0.08]);
+    });
+
+    // 肩吞: 中式甲胄最有辨识度的特征之一 —— 肩头一对兽面圆甲。
+    // 俯视时肩部是仅次于头盔的视觉重点, 而原先躯干就是几个方块, 双肩完全空白。
+    // 用「扁球(兽面) + 圆锥(兽角) + 圆环(缘口)」三层堆出体量, 全部是现有原语。
+    [-1, 1].forEach((side) => {
+      const pauldron = new THREE.Group();
+      pauldron.position.set(side * 0.29, 0.84, 0.02);
+      // 兽面: 压扁的球, 面向外侧
+      sphere(pauldron, faction.trim, 0.17, [0, 0, 0], [0.72, 1, 1], 12);
+      // 缘口: 一圈暗色滚边, 让肩甲有厚度
+      const rim = new THREE.Mesh(
+        new THREE.TorusGeometry(0.155, 0.028, 6, 16),
+        faction.darkTrim
+      );
+      rim.rotation.y = Math.PI / 2;
+      rim.position.set(side * 0.02, 0, 0);
+      rim.castShadow = true;
+      pauldron.add(rim);
+      // 兽角: 两只小锥体朝外上方翘
+      cone(pauldron, faction.accent, 0.042, 0.17, [side * 0.06, 0.14, -0.06], [0, 0, -side * 0.5], 7);
+      cone(pauldron, faction.accent, 0.034, 0.13, [side * 0.06, 0.12, 0.07], [0, 0, -side * 0.62], 7);
+      // 甲片: 肩下悬垂的两片护肩
+      box(pauldron, faction.cloth, [0.15, 0.1, 0.03], [side * 0.02, -0.13, 0.08], [0.18, 0, 0]);
+      box(pauldron, faction.cloth, [0.15, 0.1, 0.03], [side * 0.03, -0.13, -0.06], [-0.16, 0, 0]);
+      model.add(pauldron);
+    });
+
+    // 胸甲分片: 躯干正面原本是一整块平面, 加三道横向甲片压出"札甲"层次。
+    // 只抬高 0.01, 靠明暗差读出结构, 不改变整体轮廓。
+    [-0.1, 0.02, 0.14].forEach((y, i) => {
+      box(
+        model,
+        i % 2 === 0 ? faction.trim : faction.darkTrim,
+        [0.4 - i * 0.03, 0.075, 0.026],
+        [0, 0.62 + y, 0.15 - i * 0.004],
+        [0.12, 0, 0]
+      );
     });
 
     const cape = new THREE.Group();

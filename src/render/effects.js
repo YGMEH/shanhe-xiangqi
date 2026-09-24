@@ -60,13 +60,16 @@ export class EffectsSystem {
     this.add({
       elapsed: 0,
       duration: 1.1,
-      update: (t) => {
+      update: (t, delta = 1 / 60) => {
         const array = geometry.attributes.position.array;
+        // 固定 step 是把帧数当时间用: 144Hz 下尘雾扩散速度只有 60Hz 的 40%,
+        // 掉到 30fps 又会拖出很长的尾迹。改用真实 delta 积分, 效果时长与帧率解耦。
+        const step = Math.min(delta, 0.05);
         for (let i = 0; i < count; i += 1) {
-          array[i * 3] += velocities[i].x * 0.016;
-          array[i * 3 + 1] += velocities[i].y * 0.016;
-          array[i * 3 + 2] += velocities[i].z * 0.016;
-          velocities[i].y -= 0.035 * 0.016;
+          array[i * 3] += velocities[i].x * step;
+          array[i * 3 + 1] += velocities[i].y * step;
+          array[i * 3 + 2] += velocities[i].z * step;
+          velocities[i].y -= 0.035 * step;
         }
         geometry.attributes.position.needsUpdate = true;
         material.opacity = (1 - t) * 0.48;
@@ -132,13 +135,15 @@ export class EffectsSystem {
     this.add({
       elapsed: 0,
       duration: heavy ? 0.9 : 0.62,
-      update: (t) => {
+      update: (t, delta = 1 / 60) => {
+        const step = Math.min(delta, 0.05);
         smoke.scale.setScalar(smokeScale + t * smokeScale * 2.4);
         smoke.material.opacity = (1 - t) * 0.82;
-        smoke.position.y += 0.006;
+        // 原来是 0.006/帧, 按 60fps 折算成 0.36/秒
+        smoke.position.y += 0.36 * step;
         sparks.children.forEach((spark, index) => {
-          spark.position.addScaledVector(velocities[index], 0.016);
-          velocities[index].y -= 0.08 * 0.016;
+          spark.position.addScaledVector(velocities[index], step);
+          velocities[index].y -= 0.08 * step;
           spark.scale.setScalar(
             Math.max(0.4, 1 - t * 0.7) * Math.max(2.4, base * 3.2)
           );
@@ -307,7 +312,8 @@ export class EffectsSystem {
       this.add({
         elapsed: 0,
         duration: 0.56,
-        update: (t) => {
+        update: (t, delta = 1 / 60) => {
+          const step = Math.min(delta, 0.05);
           const eased = t * t * (3 - 2 * t);
           projectile.position.copy(curve.getPoint(eased));
           tracer.material.opacity = Math.max(0, 0.48 - t * 0.46);
@@ -332,10 +338,20 @@ export class EffectsSystem {
             this.scene.add(puff);
             smokePuffs.push({ sprite: puff, life: 0.5 });
           }
-          smokePuffs.forEach(({ sprite }) => {
-            sprite.scale.multiplyScalar(1.045);
-            sprite.material.opacity *= 0.94;
-            sprite.userData.life = (sprite.userData.life ?? 0) + 0.016;
+          // 1.045 和 0.94 都是"每帧"系数, 直接连乘等于把帧率当时间用。
+          // 按 step*60 帧折算成幂函数, 才能在不同帧率下保持同样的膨胀/淡出曲线。
+          const puffStep = Math.pow(1.045, step * 60);
+          const puffFade = Math.pow(0.94, step * 60);
+          smokePuffs.forEach((puff) => {
+            puff.sprite.scale.multiplyScalar(puffStep);
+            puff.sprite.material.opacity *= puffFade;
+            puff.life -= step;
+            // life 之前只累加不使用, 烟团在 0.56s 结束后会一直挂在场景里
+            // (不可见但仍在遍历), 现在到期就把 sprite 从场景摘掉。
+            if (puff.life <= 0 && puff.sprite.visible) {
+              puff.sprite.visible = false;
+              this.scene.remove(puff.sprite);
+            }
           });
           if (t > 0.97 && !impacted) {
             impacted = true;
@@ -432,16 +448,17 @@ export class EffectsSystem {
       this.add({
         elapsed: -delay,
         duration: 0.9,
-        update: (t) => {
+        update: (t, delta = 1 / 60) => {
           // t 为负表示还没到出现时机
           if (t < 0) return;
           points.visible = true;
+          const step = Math.min(delta, 0.05);
           const array = geometry.attributes.position.array;
           for (let k = 0; k < count; k += 1) {
-            array[k * 3] += velocities[k].x * 0.016;
-            array[k * 3 + 1] += velocities[k].y * 0.016;
-            array[k * 3 + 2] += velocities[k].z * 0.016;
-            velocities[k].y -= 0.018 * 0.016;
+            array[k * 3] += velocities[k].x * step;
+            array[k * 3 + 1] += velocities[k].y * step;
+            array[k * 3 + 2] += velocities[k].z * step;
+            velocities[k].y -= 0.018 * step;
           }
           geometry.attributes.position.needsUpdate = true;
           material.opacity = (1 - t) * alpha;

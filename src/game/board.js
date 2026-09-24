@@ -1,6 +1,4 @@
 import {
-  BOARD_COLUMNS,
-  BOARD_ROWS,
   PIECE_TYPES,
   SIDES,
   inBoard,
@@ -53,8 +51,6 @@ export function createPiece(type, side, x, y, extra = {}) {
   };
 }
 
-const pieceKey = (piece) => `${piece.side[0]}${piece.type[0]}${piece.x}${piece.y}`;
-
 export function clonePieces(pieces) {
   return pieces.map((piece) => ({ ...piece }));
 }
@@ -67,7 +63,11 @@ export class BoardState {
   }
 
   clone() {
-    return new BoardState(clonePieces(this.pieces), this.turn, this.history);
+    return new BoardState(
+      clonePieces(this.pieces),
+      this.turn,
+      Array.isArray(this.history) ? [...this.history] : []
+    );
   }
 
   pieceAt(x, y) {
@@ -106,7 +106,12 @@ export class BoardState {
     const piece = this.pieceById(pieceId);
     if (!piece || !inBoard(toX, toY)) return null;
 
-    const target = captured ?? this.pieceAt(toX, toY);
+    const requestedTarget = captured ?? this.pieceAt(toX, toY);
+    // 调用方可能传入从存档/网络反序列化得到的同 id 副本, 不能用
+    // Array#indexOf 依赖对象身份, 否则目标棋子会留在原地而和移动棋子重叠。
+    const target = requestedTarget?.id
+      ? this.pieceById(requestedTarget.id)
+      : requestedTarget;
     const fromX = piece.x;
     const fromY = piece.y;
     if (target) {
@@ -135,20 +140,37 @@ export class BoardState {
     if (captured) this.pieces.splice(targetIndex, 1);
     piece.x = toX;
     piece.y = toY;
-    return { piece, captured, fromX, fromY };
+    return { piece, captured, fromX, fromY, capturedIndex: targetIndex };
   }
 
   undoMove(record) {
     if (!record) return;
     record.piece.x = record.fromX;
     record.piece.y = record.fromY;
-    if (record.captured) this.pieces.push(record.captured);
+    if (record.captured) {
+      // 被吃子必须放回它原来的下标, 不能 push 到末尾。
+      // 规则查询(isInCheck / getLegalMoves)内部就是 moveInPlace + undoMove,
+      // push 会让"哪一方先被枚举"随查询次数漂移; AI 排序和胜负判定都
+      // 依赖棋子顺序, 于是同一局面会给出不同推荐着法。
+      const index = Number.isInteger(record.capturedIndex)
+        ? Math.min(record.capturedIndex, this.pieces.length)
+        : this.pieces.length;
+      this.pieces.splice(index, 0, record.captured);
+    }
   }
 }
 
+/**
+ * 局面指纹, 用于三次重复判和等按局面比对的逻辑。
+ *
+ * 之前用 `type[0]` 取首字母, 而 chariot / cannon / chariot 都写作 "c",
+ * soldier / advisor 都写作 "s" —— "红车在(a,b)" 与 "红炮在(a,b)" 会生成
+ * 完全相同的 key。只要双方在同样两个点上轮换车和炮, 就会在十几手内被
+ * 误判成"三次相同局面"而提前和棋。这里保留完整棋子名, 保证一一对应。
+ */
 export function positionKey(pieces, turn) {
   const board = pieces
-    .map((piece) => `${piece.side[0]}${piece.type[0]}${piece.x}${piece.y}`)
+    .map((piece) => `${piece.side}:${piece.type}@${piece.x},${piece.y}`)
     .sort()
     .join("|");
   return `${turn}:${board}`;

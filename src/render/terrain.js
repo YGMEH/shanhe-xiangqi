@@ -88,6 +88,53 @@ function displaceGeometry(geometry, amount, seed = 0, frequency = 1.6) {
   return geometry;
 }
 
+/**
+ * 远山专用位移: 与 displaceGeometry 的区别是沿高度衰减扰动量。
+ *
+ * 锥体顶点的法线是奇异的, 逐顶点沿法线推会产生针状尖刺, 远看像一排锯齿。
+ * 这里让扰动量在山脚最大、接近峰顶时收敛到 0, 于是峰线保持干净, 而山体
+ * 中下段仍然是不规则的岩壁。
+ */
+function displaceRidgeGeometry(geometry, amount, seed = 0, frequency = 0.9) {
+  const position = geometry.attributes.position;
+  if (!geometry.attributes.normal) geometry.computeVertexNormals();
+  const normals = geometry.attributes.normal;
+
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (let i = 0; i < position.count; i += 1) {
+    const y = position.getY(i);
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  const span = Math.max(1e-4, maxY - minY);
+
+  for (let i = 0; i < position.count; i += 1) {
+    const x = position.getX(i);
+    const y = position.getY(i);
+    const z = position.getZ(i);
+    const t = (y - minY) / span; // 0 山脚, 1 峰顶
+
+    const noise =
+      fbm(x * frequency + seed * 3.7, z * frequency - seed * 2.1) * 0.62 +
+      fbm(y * frequency * 2.3 + seed * 1.3, x * frequency * 1.7 + seed) * 0.38;
+
+    // 顶部收敛: t=0 时满幅, t=1 时几乎不动。
+    const taper = 1 - smoothstep(0.62, 1, t);
+    const offset = (noise - 0.5) * 2 * amount * taper;
+
+    position.setXYZ(
+      i,
+      x + normals.getX(i) * offset,
+      y + normals.getY(i) * offset * 0.35, // 纵向少推, 避免峰顶被拉长成尖刺
+      z + normals.getZ(i) * offset
+    );
+  }
+  position.needsUpdate = true;
+  geometry.computeVertexNormals();
+  return geometry;
+}
+
 export function terrainHeightAt(x, z) {
   const boardX = x / 12.1;
   const boardZ = z / 8.55;
@@ -139,9 +186,22 @@ export function createTerrain(materials, quality = "high") {
     position.setY(i, y);
     const moisture = 1 - smoothstep(1.2, 3.4, Math.abs(z));
     const variation = fbm(x * 1.4 + 7, z * 1.4 - 4);
-    const soilR = 0.56 + variation * 0.15 - moisture * 0.08;
-    const soilG = 0.47 + variation * 0.12 - moisture * 0.02;
-    const soilB = 0.32 + variation * 0.09 - moisture * 0.1;
+    // 河岸草皮: 湿度高的地方把土壤往草绿推。
+    //
+    // 为什么走顶点色而不是种立体的草叶: 这是俯视棋类, 默认相机在 21 米高。
+    // 竖直的草叶平面在俯视下只能看到"侧棱", 无论做多宽都渲染成一条线 ——
+    // 铺得越多越像一地黑刺 (实测加宽+提亮+增密都没有改善观感)。
+    // 俯视视角下"草"正确的载体是地面的颜色, 立体草叶只作为低视角时的补充。
+    //
+    // 边界扰动: 直接拿 moisture 当草量会得到一条与河岸平行、边缘锐利的绿带
+    // (近景看像泼了一道绿漆)。真实的河岸草线是犬牙交错的 —— 用一层独立噪声
+    // 去扰动湿润度, 让草绿有选择地渗进旱地, 边缘就有了自然的斑点过渡。
+    const edgeNoise = (fbm(x * 0.9 - 3, z * 0.9 + 5) - 0.5) * 0.85;
+    const moistNoisy = THREE.MathUtils.clamp(moisture + edgeNoise * moisture, 0, 1);
+    const grass = moistNoisy * (0.5 + fbm(x * 3.1 + 11, z * 3.1 - 6) * 0.5);
+    const soilR = 0.56 + variation * 0.15 - moisture * 0.08 - grass * 0.24;
+    const soilG = 0.47 + variation * 0.12 - moisture * 0.02 + grass * 0.11;
+    const soilB = 0.32 + variation * 0.09 - moisture * 0.1 - grass * 0.1;
 
     // Pale weathered paving laid into the ground across the playable grid.
     // Blending the colour instead of adding a raised slab keeps the terrain
@@ -214,29 +274,54 @@ export function createRiver(materials) {
 
   const pebbles = new THREE.Group();
   pebbles.name = "riverbed-pebbles";
+  // 河床卵石专用材质: 比岸上的石材更暖、更亮。
+  //
+  // 为什么不能直接用 materials.stone / stoneDark: 水是 transmission 0.42 的
+  // 半透明面, 透过它看到的石头会被水色(0x1d5a5c, 冷青)再压一层。岸上石材的
+  // 灰褐色 #726c60 经过这层青水之后变成又暗又脏的冷灰斑块, 近景看像河里沉着
+  // 一堆煤渣, 与整体黄昏暖调完全脱节。
+  //
+  // 注意: 单纯把水下的石头调亮是**无效**的。水面在 y=0, 石头压在 y=-0.6,
+  // opacity 0.88 意味着只有约 12% 的直射光语义能穿透水面被相机读到, 画面里
+  // 看到的基本是水的吸收色而非石头本身的颜色。所以「提亮卵石材质」这条路
+  // 已经被实测证否(见 docs/ART_BRIEF.md 的河床条目), 正确做法是让石头
+  // **露出水面**: 石头一旦破面, 它的明度与暖度才真正进入画面。
+  const pebbleMaterial = new THREE.MeshStandardMaterial({
+    color: 0xb9a480,
+    roughness: 0.7,
+    metalness: 0.02,
+  });
   const pebbleGeometry = new THREE.DodecahedronGeometry(0.07, 0);
-  for (let i = 0; i < 110; i += 1) {
-    const pebble = new THREE.Mesh(pebbleGeometry, materials.stone);
+  for (let i = 0; i < 150; i += 1) {
+    const pebble = new THREE.Mesh(pebbleGeometry, pebbleMaterial);
     pebble.position.set(
       (Math.random() - 0.5) * 24,
-      -0.6 + Math.random() * 0.04,
+      // 破水线: -0.10 ~ +0.09 让约四成石头露出水面, 其余半淹。
+      // 河床在 -0.72, 水面在 0 —— 0.62 的浅滩里石头露头是物理诚实的。
+      -0.10 + Math.random() * 0.19,
       (Math.random() - 0.5) * 2.9
     );
     pebble.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
     pebble.scale.set(
       0.6 + Math.random() * 1.4,
-      0.4 + Math.random() * 0.5,
+      0.5 + Math.random() * 0.6,
       0.6 + Math.random() * 1.4
     );
+    pebble.castShadow = true;
     pebble.receiveShadow = true;
     pebbles.add(pebble);
   }
 
   // Wet boulders breaking the current.
+  const boulderMaterial = new THREE.MeshStandardMaterial({
+    color: 0xa89272,
+    roughness: 0.62,
+    metalness: 0.03,
+  });
   for (let i = 0; i < 14; i += 1) {
     const boulder = new THREE.Mesh(
       new THREE.DodecahedronGeometry(0.16 + Math.random() * 0.22, 1),
-      materials.stoneDark
+      boulderMaterial
     );
     displaceGeometry(boulder.geometry, 0.07, i, 2.1);
     boulder.position.set(
@@ -385,14 +470,37 @@ export function createBridges(materials) {
         post.castShadow = true;
         bridge.add(post);
 
-        const cap = new THREE.Mesh(
-          new THREE.SphereGeometry(0.12, 10, 7),
+        // 柱头: 中式石桥的望柱头。
+        //
+        // 旧实现是压扁的球体 (SphereGeometry + scale.y=0.7), 近看就是一颗
+        // 光滑鹅卵石 —— 石材不该是这种圆润无棱的形态。
+        // 改成方础 + 收分覆斗 + 顶部小方台: 三段方几何堆出有棱角的望柱头,
+        // 与栏杆方柱的语言一致, 且面数比球体更低 (方盒 12 tri vs 球 120 tri)。
+        const capBase = new THREE.Mesh(
+          new THREE.BoxGeometry(0.24, 0.07, 0.24, 1, 1, 1),
+          materials.stone
+        );
+        capBase.position.set(side * (bridgeWidth * 0.5 + 0.03), 0.775, i * 1.28);
+        capBase.castShadow = true;
+        bridge.add(capBase);
+
+        // 覆斗: 上小下大的四棱台, 用 4 段圆柱近似 (顶面 4 边形 -> 棱台)
+        const capTaper = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.075, 0.115, 0.13, 4, 1),
           materials.stoneDark
         );
-        cap.position.set(side * (bridgeWidth * 0.5 + 0.03), 0.79, i * 1.28);
-        cap.scale.set(1, 0.7, 1);
-        cap.castShadow = true;
-        bridge.add(cap);
+        capTaper.rotation.y = Math.PI / 4; // 让方边与柱身对齐
+        capTaper.position.set(side * (bridgeWidth * 0.5 + 0.03), 0.875, i * 1.28);
+        capTaper.castShadow = true;
+        bridge.add(capTaper);
+
+        const capTop = new THREE.Mesh(
+          new THREE.BoxGeometry(0.1, 0.05, 0.1, 1, 1, 1),
+          materials.stone
+        );
+        capTop.position.set(side * (bridgeWidth * 0.5 + 0.03), 0.962, i * 1.28);
+        capTop.castShadow = true;
+        bridge.add(capTop);
       }
     });
 
@@ -434,39 +542,74 @@ export function createBridges(materials) {
   return group;
 }
 
+/**
+ * 远山山脊。设计要点（每条都对应一个"一眼假"的失效模式）:
+ *
+ * 1. 高分段锥体 (径向 18~26, 高度 7)。旧实现只有 5~8 段, 山体就是几块平直大
+ *    面片拼的锥子, 轮廓生硬。
+ * 2. 平滑着色 + 逐顶点色。平坦着色会把每块面片照成同样的亮度, 远山变成刺眼的
+ *    色块; 改为按海拔做色带后, 山脚压暗、山腰过渡、山顶提亮, 读起来才有体积。
+ * 3. 强扰动。扰动量与锥半径挂钩, 让山脊线不规则, 避免整齐的锥形轮廓。
+ * 4. 大气透视。逐顶点沿高度向雾色混合, 越远越淡, 与天空自然衔接, 而不是
+ *    "贴"在天上的一排剪影。
+ *
+ * 全部是几何与顶点色参数, 不增加任何外部资源体积。
+ */
 export function createDistantRidges(materials, quality = "high") {
   const group = new THREE.Group();
   group.name = "distant-ridges";
 
+  const high = quality !== "low";
+  // 大气色: 跟随新天空背景板 (暖金夕照) 的雾色。远山是逆光剪影, 底色偏暖灰紫,
+  // 而不是冷青绿 —— 冷色山体压在暖色天空下会明显割裂。
+  const haze = new THREE.Color(0xb08a72);
+
   const layers = [
     {
-      color: 0x4c5d59,
-      count: quality === "high" ? 26 : 14,
+      // 远层: 更淡更接近天色, 被夕阳的散射吃掉最多
+      foot: new THREE.Color(0x33403f),
+      mid: new THREE.Color(0x4a5050),
+      peak: new THREE.Color(0x6b635c),
+      count: high ? 26 : 14,
       radius: 43,
-      height: 7.2,
+      height: 7.6,
       base: -0.9,
       spread: 1.7,
       depth: 1.9,
+      hazeMix: 0.34,
+      radial: high ? 20 : 12,
     },
     {
-      color: 0x5a6a64,
-      count: quality === "high" ? 22 : 12,
+      // 近层: 更实更暗, 保留可辨认的岩体结构
+      foot: new THREE.Color(0x2f3a36),
+      mid: new THREE.Color(0x424a44),
+      peak: new THREE.Color(0x5e5a4e),
+      count: high ? 22 : 12,
       radius: 37,
-      height: 5.2,
+      height: 5.4,
       base: -0.76,
       spread: 1.5,
       depth: 1.5,
+      hazeMix: 0.2,
+      radial: high ? 18 : 10,
     },
   ];
 
   layers.forEach((layer, layerIndex) => {
-    const material = new THREE.MeshStandardMaterial({
-      color: layer.color,
-      roughness: 1,
-      metalness: 0,
-      flatShading: true,
+    // 远山用 MeshLambertMaterial 而不是 MeshStandardMaterial。
+    //
+    // 为什么: Standard 是 PBR 材质, roughness=1/metalness=0 时会全量接收
+    // scene.environment 的 IBL。本场景的 HDRI 环境强度 0.62, 会把哪怕顶点色
+    // 只有 RGB(39,54,52) 的山体整体提亮成灰白, 看起来像雪山/石膏, 与暖调
+    // 前景完全打架。Far mountain 不需要金属度/清漆这类 PBR 特性, 用 Lambert
+    // 只吃方向光 + 环境光底色, 山体的明暗就由我们写入的顶点色主导。
+    const material = new THREE.MeshLambertMaterial({
+      color: 0xffffff, // 颜色全部走顶点色
+      vertexColors: true,
+      emissive: layer.foot.clone().multiplyScalar(0.35),
       fog: true,
     });
+
     for (let i = 0; i < layer.count; i += 1) {
       const angle =
         Math.PI * 0.88 + (i / Math.max(1, layer.count - 1)) * Math.PI * 1.24;
@@ -474,15 +617,22 @@ export function createDistantRidges(materials, quality = "high") {
       const height = layer.height * (0.5 + hash2d(i, 31) * 0.9);
       const radius = height * (0.46 + hash2d(i, 44) * 0.24);
 
-      // Two overlapping, displaced crags read as a real ridge line rather
-      // than a row of obvious cones.
+      // 多个重叠位移的山峰读起来像一条真山脊, 而不是一排明显的锥子。
       const stack = new THREE.Group();
-      const peakCount = quality === "high" ? 3 : 2;
+      const peakCount = high ? 3 : 2;
       for (let p = 0; p < peakCount; p += 1) {
         const peakHeight = height * (p === 0 ? 1 : 0.52 + hash2d(i * 7 + p, 61) * 0.34);
         const peakRadius = radius * (p === 0 ? 1 : 0.66 + hash2d(i * 5 + p, 73) * 0.3);
-        const geometry = new THREE.ConeGeometry(peakRadius, peakHeight, 5 + ((i + p) % 4), 3);
-        displaceGeometry(geometry, peakRadius * 0.24, i * 3 + p, 0.9);
+        const geometry = new THREE.ConeGeometry(
+          peakRadius,
+          peakHeight,
+          layer.radial,
+          high ? 7 : 4 // 高度分段: 让位移沿山体纵向也有变化
+        );
+        displaceRidgeGeometry(geometry, peakRadius * 0.5, i * 3 + p, 0.85);
+
+        applyRidgeVertexColors(geometry, layer, haze, hash2d(i * 19 + p, 55));
+
         const peak = new THREE.Mesh(geometry, material);
         peak.position.set(
           (hash2d(i * 11 + p, 83) - 0.5) * radius * 0.8,
@@ -508,6 +658,44 @@ export function createDistantRidges(materials, quality = "high") {
   });
 
   return group;
+}
+
+/**
+ * 给远山几何体写入逐顶点色: 山脚 -> 山腰 -> 山顶的三段色带, 再整体向大气雾色
+ * 混合, 形成远淡近浓的空气透视。没有顶点色的远山会是一块均匀的剪影。
+ */
+function applyRidgeVertexColors(geometry, layer, haze, tint = 0.5) {
+  const position = geometry.attributes.position;
+  const colors = new Float32Array(position.count * 3);
+  const color = new THREE.Color();
+  const localHaze = haze.clone().lerp(
+    new THREE.Color(0x9fb2ad),
+    tint * 0.35
+  );
+
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (let i = 0; i < position.count; i += 1) {
+    const y = position.getY(i);
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  const span = Math.max(1e-4, maxY - minY);
+
+  for (let i = 0; i < position.count; i += 1) {
+    const t = (position.getY(i) - minY) / span; // 0 = 山脚, 1 = 山顶
+    if (t < 0.55) {
+      color.copy(layer.foot).lerp(layer.mid, smoothstep(0, 0.55, t));
+    } else {
+      color.copy(layer.mid).lerp(layer.peak, smoothstep(0.55, 1, t));
+    }
+    // 空气透视: 越靠近峰顶越吃雾色, 山体自然融进天空。
+    color.lerp(localHaze, layer.hazeMix * (0.35 + t * 0.65));
+    colors[i * 3] = color.r;
+    colors[i * 3 + 1] = color.g;
+    colors[i * 3 + 2] = color.b;
+  }
+  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
 }
 
 export function createGroundSkirt(materials) {
@@ -673,43 +861,137 @@ export function createBoundaryDetails(materials, quality = "high") {
     group.add(tree);
   }
 
-  // Riverbank reeds and grass tufts: thin instanced blades catch the low sun
-  // and give the waterline a believable, lived-in edge.
-  const reedMaterial = new THREE.MeshStandardMaterial({
-    color: 0x5f6b3d,
-    roughness: 0.95,
+  // 河岸草丛。
+  //
+  // 这一段被推翻重做过三次, 过程值得记下来。
+  //
+  // 最初的实现是"150 片竖直窄叶均匀随机撒点", 俯视像一地牙签。
+  // 第二次改成成簇 (簇心 + 8 片叶 + 枯荣顶点色), 近景变好但俯视仍是黑刺。
+  // 第三次尝试加宽(0.16)压矮(0.5)并提亮颜色、加密到 130 簇 —— 反而更糟,
+  // 俯视变成一排排黑色短横线。
+  //
+  // 三次都失败的原因不是参数, 是几何本身: **竖直平面在俯视下只能看到侧棱**,
+  // 无论多宽多亮, 投影永远是一条线; 而在近景低机位, 叶片背光面又会整片
+  // 渲染成黑块。也就是说这种几何在任何机位都读不出"草"。
+  //
+  // 结论: 草的载体是地面顶点色 (见 createTerrain 里的 grass 项), 立体几何
+  // 只能做成"贴地草丛"—— 高度压到几乎为零, 靠一小片贴地的浅色斑块提供
+  // 近景的草丛暗示, 而不是竖起来当叶片用。
+  const reedMaterial = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    vertexColors: true,
     side: THREE.DoubleSide,
+    toneMapped: true,
   });
-  const reedGeometry = new THREE.PlaneGeometry(0.06, 0.62, 1, 2);
-  reedGeometry.translate(0, 0.31, 0);
-  const reedCount = quality === "high" ? 150 : 80;
+  // 贴地草丛: 一个近水平的窄矩形, 根部略窄、尖端略宽, 整体贴地。
+  // 用 MeshBasicMaterial 而非 Standard: 它只作为地面色斑存在, 不需要再参与
+  // 光照计算 —— 参与光照反而会在背光侧压暗成黑块 (这正是前几版的问题)。
+  const reedGeometry = new THREE.PlaneGeometry(0.42, 0.26, 2, 1);
+  reedGeometry.rotateX(-Math.PI / 2); // 放平, 贴地
+  reedGeometry.translate(0, 0.012, 0); // 抬高 12mm 避免与地面 z-fighting
+  {
+    // 边缘做一点不规则: 让贴地草丛不是死板的矩形
+    const pos = reedGeometry.attributes.position;
+    for (let i = 0; i < pos.count; i += 1) {
+      const px = pos.getX(i);
+      const pz = pos.getZ(i);
+      // 越靠外的顶点收得越窄, 形成一个梭形
+      const taper = 1 - Math.abs(pz / 0.13) * 0.35;
+      pos.setX(i, px * taper);
+    }
+    pos.needsUpdate = true;
+  }
+
+  // 枯荣色带: 整体提亮并偏向黄昏暖光, 与地面草绿的顶点色衔接。
+  //
+  // 注意材质是 MeshBasicMaterial (不参与光照), 所以这些色值**直接就是屏幕上
+  // 的最终颜色**, 没有灯光增益。第一版沿用了 Standard 材质时期的色值
+  // (0x7d8a4a 一类), 结果在画面上呈现为一块块深色泥斑而不是草。
+  // 这里整体往亮、往暖推, 让它读作"被夕阳照到的草皮"。
+  const REED_TONES = [
+    new THREE.Color(0xa8b46a),
+    new THREE.Color(0xb6bd76),
+    new THREE.Color(0xc2c182),
+    new THREE.Color(0xcfc68e),
+    new THREE.Color(0xafb96e),
+    new THREE.Color(0xd8ca96),
+  ];
+
+  const tuftCount = quality === "high" ? 62 : 30;
+  const bladesPerTuft = quality === "high" ? 8 : 6;
+  const reedCount = tuftCount * bladesPerTuft;
   const reeds = new THREE.InstancedMesh(reedGeometry, reedMaterial, reedCount);
   reeds.name = "reeds";
+  reeds.instanceColor = new THREE.InstancedBufferAttribute(
+    new Float32Array(reedCount * 3),
+    3
+  );
+
   const dummy = new THREE.Object3D();
-  for (let i = 0; i < reedCount; i += 1) {
-    const bank = i % 2 === 0 ? -1 : 1;
-    const x = (hash2d(i, 61) - 0.5) * 25;
-    const z = bank * (1.62 + hash2d(i, 67) * 1.05);
+  const tmpColor = new THREE.Color();
+  let instance = 0;
+
+  for (let t = 0; t < tuftCount; t += 1) {
+    // 簇心分布: 七成贴河岸 (水边草最密), 三成散到离河较远的旱地。
+    const bank = t % 2 === 0 ? -1 : 1;
+    const farTuft = hash2d(t, 137) > 0.7;
+    const cx = (hash2d(t, 61) - 0.5) * 28;
+    const cz = farTuft
+      ? bank * (2.6 + hash2d(t, 67) * 3.4) // 旱地散点
+      : bank * (1.5 + hash2d(t, 67) * 1.5); // 近岸密生
     const nearBridge = BRIDGE_COLUMNS.some((column) => {
       const bridgeX = (column - (BOARD_COLUMNS - 1) / 2) * BOARD_SPACING.x;
-      return Math.abs(x - bridgeX) < 1.5;
+      return Math.abs(cx - bridgeX) < 1.6;
     });
-    if (nearBridge) continue;
-    const y = terrainHeightAt(x, z);
-    dummy.position.set(x, y, z);
-    dummy.rotation.set(
-      (hash2d(i, 71) - 0.5) * 0.22,
-      hash2d(i, 73) * Math.PI,
-      (hash2d(i, 79) - 0.5) * 0.28
-    );
-    const scale = 0.45 + hash2d(i, 83) * 0.5;
-    dummy.scale.set(1, scale, 1);
-    dummy.updateMatrix();
-    reeds.setMatrixAt(i, dummy.matrix);
+    if (nearBridge) {
+      // 桥位让空: 这些实例留成零缩放, 视觉上不存在
+      for (let b = 0; b < bladesPerTuft; b += 1) {
+        dummy.position.set(0, -50, 0);
+        dummy.scale.set(0, 0, 0);
+        dummy.updateMatrix();
+        reeds.setMatrixAt(instance, dummy.matrix);
+        reeds.setColorAt(instance, tmpColor.setHex(0x000000));
+        instance += 1;
+      }
+      continue;
+    }
+
+    // 整簇共用一个基调色, 簇间才有枯荣差异
+    const tone = REED_TONES[Math.floor(hash2d(t, 89) * REED_TONES.length) % REED_TONES.length];
+    const tuftSpread = 0.22 + hash2d(t, 91) * 0.2;
+
+    for (let b = 0; b < bladesPerTuft; b += 1) {
+      // 斑块在簇心附近聚集, 椭圆分布
+      const a = hash2d(t * 13 + b, 97) * Math.PI * 2;
+      const r = Math.sqrt(hash2d(t * 17 + b, 101)) * tuftSpread;
+      const x = cx + Math.cos(a) * r;
+      const z = cz + Math.sin(a) * r * 0.8;
+      const y = terrainHeightAt(x, z);
+
+      // 贴地: 只绕 Y 轴旋转 + 轻微倾斜, 让斑块顺着地形起伏
+      dummy.position.set(x, y - 0.01, z);
+      dummy.rotation.set(
+        (hash2d(t * 19 + b, 71) - 0.5) * 0.12,
+        hash2d(t * 23 + b, 73) * Math.PI * 2,
+        (hash2d(t * 29 + b, 79) - 0.5) * 0.12
+      );
+      const s = 0.6 + hash2d(t * 31 + b, 83) * 0.75;
+      dummy.scale.set(s, 1, s * (0.7 + hash2d(t * 37 + b, 87) * 0.6));
+      dummy.updateMatrix();
+      reeds.setMatrixAt(instance, dummy.matrix);
+
+      // 簇内也做轻微明暗差, 避免整簇一个色
+      tmpColor.copy(tone).multiplyScalar(0.84 + hash2d(t * 41 + b, 103) * 0.32);
+      reeds.setColorAt(instance, tmpColor);
+      instance += 1;
+    }
   }
+
   reeds.instanceMatrix.needsUpdate = true;
+  if (reeds.instanceColor) reeds.instanceColor.needsUpdate = true;
   reeds.castShadow = false;
-  reeds.receiveShadow = true;
+  reeds.receiveShadow = false; // 贴地色斑不参与阴影, 避免自阴影变黑
+  reeds.renderOrder = 1;
   group.add(reeds);
 
   const bannerMaterialRed = new THREE.MeshBasicMaterial({
@@ -830,29 +1112,72 @@ function buildCamps(group, bark, hash2d) {
   }
 }
 
-/** 帐篷: 八角柱身 + 圆锥顶 + 顶旗杆 */
+/** 军帐: 八角柱身 + 攒尖帐顶 + 顶旗杆
+ *
+ * 原来的顶是一个 "完美圆锥": roofH / roofR 恰好 = 0.85/0.86 = 0.99,
+ * 半顶角 45.3°, 且锥底半径(0.86 size)大于柱身顶半径(0.62 size),
+ * 形成一圈外挑檐; 锥底平面又浮在柱身顶面之上。近景看过去就是一顶
+ * 现代露营圆顶帐 / 倒扣的碗。
+ *
+ * 中式军帐不是圆锥:
+ *   · 攒尖顶(sì jiǎo zǎn jiān)四坡向上收拢, 脊线挺直, 半顶角要陡得多
+ *   · 屋面比墙体大出一圈形成檐口, 但檐口必须**贴着**墙顶, 不能悬空
+ *   · 顶部收成一个短小的宝顶/旗杆座, 而不是尖点
+ * 这里按这个结构重做: 4 面攒尖(segments=4) + 无缝檐口 + 宝顶。
+ */
 function makeTent(size, material) {
   const tent = new THREE.Group();
 
+  // 墙体: 略收分(下大上小), 八角。
+  const baseHeight = size * 0.58;
+  const wallTop = baseHeight / 2;
   const base = new THREE.Mesh(
-    new THREE.CylinderGeometry(size * 0.62, size * 0.78, size * 0.55, 8),
+    new THREE.CylinderGeometry(size * 0.64, size * 0.78, baseHeight, 8),
     material
   );
-  base.position.y = size * 0.28;
+  base.position.y = wallTop;
   base.castShadow = true;
   base.receiveShadow = true;
   tent.add(base);
 
-  const roof = new THREE.Mesh(new THREE.ConeGeometry(size * 0.86, size * 0.85, 8), material);
-  roof.position.y = size * 0.72 + size * 0.42;
-  roof.castShadow = true;
-  tent.add(roof);
-
-  const pole = new THREE.Mesh(
-    new THREE.CylinderGeometry(size * 0.028, size * 0.028, size * 0.5, 5),
+  // 攒尖顶: 4 面, 陡坡。檐口半径大于墙顶, 但底沿**落在墙顶上**。
+  const eaveY = wallTop + baseHeight / 2;
+  const eaveRadius = size * 0.70;
+  const roofHeight = size * 0.62;
+  const roof = new THREE.Mesh(
+    new THREE.ConeGeometry(eaveRadius, roofHeight, 4, 1),
     material
   );
-  pole.position.y = size * 1.14 + size * 0.25;
+  // ConeGeometry 的原点在几何中心, 所以下移半个高度让锥底落在 eaveY。
+  roof.position.y = eaveY + roofHeight / 2;
+  // 四坡的角对准墙体八角, 转 45° 让坡面对着正方向更好看。
+  roof.rotation.y = Math.PI / 4;
+  roof.castShadow = true;
+  roof.receiveShadow = true;
+  tent.add(roof);
+
+  // 檐口压边: 一圈薄八角环, 把屋面与墙体的接缝盖住(悬空感的来源)。
+  const eave = new THREE.Mesh(
+    new THREE.CylinderGeometry(eaveRadius * 1.02, eaveRadius * 1.02, size * 0.045, 8),
+    material
+  );
+  eave.position.y = eaveY;
+  eave.castShadow = true;
+  tent.add(eave);
+
+  // 宝顶: 短圆柱座 + 小方顶, 顶住旗杆。收尖而不留尖刺。
+  const finialBase = new THREE.Mesh(
+    new THREE.CylinderGeometry(size * 0.075, size * 0.095, size * 0.10, 6),
+    material
+  );
+  finialBase.position.y = eaveY + roofHeight + size * 0.03;
+  tent.add(finialBase);
+
+  const pole = new THREE.Mesh(
+    new THREE.CylinderGeometry(size * 0.022, size * 0.022, size * 0.42, 5),
+    material
+  );
+  pole.position.y = eaveY + roofHeight + size * 0.22;
   tent.add(pole);
 
   return tent;

@@ -1,6 +1,4 @@
 import {
-  BOARD_COLUMNS,
-  BOARD_ROWS,
   PIECE_TYPES,
   SIDES,
   inBoard,
@@ -17,43 +15,6 @@ const ORTHOGONAL_DIRECTIONS = [
   [0, 1],
   [0, -1],
 ];
-
-function pathIsClear(state, fromX, fromY, toX, toY) {
-  if (fromX === toX) {
-    const step = Math.sign(toY - fromY);
-    for (let y = fromY + step; y !== toY; y += step) {
-      if (state.pieceAt(fromX, y)) return false;
-    }
-    return true;
-  }
-
-  if (fromY === toY) {
-    const step = Math.sign(toX - fromX);
-    for (let x = fromX + step; x !== toX; x += step) {
-      if (state.pieceAt(x, fromY)) return false;
-    }
-    return true;
-  }
-
-  return false;
-}
-
-function countBetween(state, fromX, fromY, toX, toY) {
-  let count = 0;
-  if (fromX === toX) {
-    const step = Math.sign(toY - fromY);
-    for (let y = fromY + step; y !== toY; y += step) {
-      if (state.pieceAt(fromX, y)) count += 1;
-    }
-    return count;
-  }
-
-  const step = Math.sign(toX - fromX);
-  for (let x = fromX + step; x !== toX; x += step) {
-    if (state.pieceAt(x, fromY)) count += 1;
-  }
-  return count;
-}
 
 /**
  * 标准象棋里, 车/炮/兵过河都不受"桥"的限制, 河流只是地形装饰。
@@ -187,6 +148,15 @@ export function getPseudoMoves(state, piece) {
     }
   }
 
+  // 将帅按规定不能被吃掉, 但残局存档、自定义局面或外部调用仍可能给出
+  // 缺少己方将帅的棋盘。这时不能再按常规着法枚举: 否则一个"无路可走"的
+  // 残局会被当成无子可动的困毙, 普通棋子也会一本正经地推荐去"吃将"。
+  // 直接解析成"将帅已被擒" —— 该方只剩一种可走的着法, 即对方将帅所在格。
+  const ownGeneral = state.general(piece.side);
+  if (!ownGeneral) {
+    return moves.filter((move) => move.captured?.type === PIECE_TYPES.GENERAL);
+  }
+
   return dedupeMoves(moves);
 }
 
@@ -210,13 +180,29 @@ function addFlyingGeneral(state, piece, moves) {
 }
 
 export function getLegalMoves(state, piece, options = {}) {
+  const livePiece = piece?.id ? state.pieceById(piece.id) : null;
+  if (!livePiece) return [];
   const avoidCheck = options.avoidCheck !== false;
-  const pseudoMoves = getPseudoMoves(state, piece);
+  const pseudoMoves = getPseudoMoves(state, livePiece);
   if (!avoidCheck) return pseudoMoves;
 
+  const ownGeneral = state.general(livePiece.side);
+  if (!ownGeneral) {
+    // 己方将帅已经不在棋盘上时, 这盘棋已经结束, 不应再枚举任何着法。
+    return [];
+  }
+
+  const enemyGeneral = state.general(oppositeSide(livePiece.side));
+
   return pseudoMoves.filter((move) => {
-    const record = state.moveInPlace(piece.id, move.x, move.y);
-    const inCheck = record ? isInCheck(state, piece.side) : true;
+    // 象棋以"将死"结束, 真正的合法着法不能把棋子走到将帅所在格,
+    // 更不能让普通棋子直接吃将。飞将同理: 它是攻击关系, 不是跨整条
+    // 棋盘的移动着法。
+    if (move.captured?.type === PIECE_TYPES.GENERAL || move.flying) {
+      return false;
+    }
+    const record = state.moveInPlace(livePiece.id, move.x, move.y);
+    const inCheck = record ? isInCheck(state, livePiece.side) : true;
     state.undoMove(record);
     return !inCheck;
   });
@@ -261,6 +247,20 @@ export function hasAnyLegalMove(state, side = state.turn) {
 
 export function gameStatus(state) {
   const checkedSide = state.turn;
+  // 一方将帅已经不在棋盘上(例如残局存档损坏/外部直接调用)时,
+  // 比赛其实已经结束了。旧实现会让 hasAnyLegalMove 返回 false,
+  // 再把这种局面误报成"困毙", 玩家会看到"敌军已无任何合法着法"
+  // 而不是"将帅被擒"。这里先把缺失主帅结算清楚。
+  for (const side of [SIDES.RED, SIDES.BLACK]) {
+    if (!state.general(side)) {
+      return {
+        over: true,
+        winner: oppositeSide(side),
+        reason: "checkmate",
+        inCheck: true,
+      };
+    }
+  }
   const inCheck = isInCheck(state, checkedSide);
   if (!hasAnyLegalMove(state, checkedSide)) {
     return {
@@ -297,9 +297,16 @@ export function getAllLegalMoves(state, side = state.turn) {
   return moves;
 }
 
-export function isMoveLegal(state, pieceId, toX, toY) {
+export function isMoveLegal(
+  state,
+  pieceId,
+  toX,
+  toY,
+  { requireTurn = true } = {}
+) {
   const piece = state.pieceById(pieceId);
   if (!piece) return null;
+  if (requireTurn && piece.side !== state.turn) return null;
   return getLegalMoves(state, piece).find(
     (move) => move.x === toX && move.y === toY
   ) ?? null;

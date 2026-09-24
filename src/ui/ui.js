@@ -79,11 +79,22 @@ export class GameUI {
     this.elements.blackArmy.classList.toggle("is-active", !isRed);
   }
 
-  renderCaptures(captures) {
+  /**
+   * captures[side] = 该方俘获的战利品(见 controller.runMove)。
+   * 兵力直接数棋盘上还活着的棋子: 残局战役开局本来就不足 16 子,
+   * 旧实现写死 16, 会把这些关卡显示成"已损失"的假象。
+   */
+  renderCaptures(captures, state = null) {
     renderCaptureRow(this.elements.redCaptures, captures.red, "black");
     renderCaptureRow(this.elements.blackCaptures, captures.black, "red");
-    this.elements.redStrength.textContent = `${16 - captures.black.length} 子`;
-    this.elements.blackStrength.textContent = `${16 - captures.red.length} 子`;
+    const redAlive = state
+      ? state.alive(SIDES.RED).length
+      : 16 - captures.black.length;
+    const blackAlive = state
+      ? state.alive(SIDES.BLACK).length
+      : 16 - captures.red.length;
+    this.elements.redStrength.textContent = `${redAlive} 子`;
+    this.elements.blackStrength.textContent = `${blackAlive} 子`;
   }
 
   renderInspector(piece, moveCount) {

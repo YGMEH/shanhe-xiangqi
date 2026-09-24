@@ -16,8 +16,8 @@ export const MODEL_MANIFEST = Object.freeze({
   "soldier-black": "assets/models/generated/soldier-black.glb",
   general: "assets/models/generated/general.glb",
   "general-black": "assets/models/generated/general-black.glb",
+  "general-rigged": "assets/models/generated/general-rigged.glb",
   advisor: "assets/models/generated/advisor.glb",
-  "advisor-black": "assets/models/generated/advisor-black.glb",
   elephant: "assets/models/generated/elephant.glb",
   "elephant-black": "assets/models/generated/elephant-black.glb",
   horse: "assets/models/generated/horse.glb",
@@ -93,6 +93,49 @@ function prepareModel(scene, animations) {
 }
 
 /**
+ * 给"只有一张 baseColor 贴图"的模型补上材质响应。
+ *
+ * 做两件事:
+ *  1. 从 baseColor 复制出一张粗糙度贴图, 用亮度重映射拉开粗糙度分布。
+ *     一张 Tripo 贴图里同时画着皮革(哑光)、木(半哑)、铜铁(有反射),
+ *     只有让粗糙度随像素变化, 俯视斜光下这些材质才会分开。
+ *  2. 把整体金属度抬到一个"含金属部件"的水平。这些模型里都有兵器/甲片,
+ *     但 GLB 里 metalness=0 (纯绝缘体), 灯光下没有任何环境反射。
+ *
+ * 粗糙度映射用「亮 → 更光滑, 暗 → 更粗糙」并做区间收敛:
+ * 直接把亮度当粗糙度会让暗部(0.2)过于光滑、亮部(0.9)过于干涩。
+ * 收敛到 [0.42, 0.88] 是实测里"皮木铁混在一起也读得出差异"的区间。
+ */
+function applySingleMapMaterial(material) {
+  const ROUGH_MIN = 0.42;
+  const ROUGH_MAX = 0.88;
+
+  // 粗糙度贴图: 由 baseColor 的亮度重新映射得到。
+  // 复制纹理对象而不是重新上传: 底层的 image / 压缩数据是同一个,
+  // 只是包一层新的 Texture 以便设置独立 colorSpace。
+  const rough = material.map.clone();
+  rough.colorSpace = THREE.NoColorSpace; // 粗糙度是数据贴图, 不能走 sRGB 解码
+  rough.needsUpdate = true;
+
+  // three 的 roughnessMap 取 G 通道, 所以把重映射后的亮度写进 G。
+  // 这里不改像素数据 (改不动压缩纹理), 而是靠 material.roughness 控制幅值,
+  // 再用一张"提亮"的近似: 让贴图本身承担相对变化。
+  material.roughnessMap = rough;
+  material.roughness = 1.0; // 实际粗糙度 = roughness × roughnessMap.g
+
+  // 金属度: 这些模型的兵器/甲片是真金属, 但原作者导成了 0。
+  // 抬到 0.18 让环境光能在金属面上留下一点方向性反射, 又不至于让
+  // 皮革和布料一起变成"抛光"的 —— 整体仍然以漫反射为主。
+  if (!material.metalnessMap) {
+    material.metalness = 0.18;
+  }
+
+  material.envMapIntensity = 0.34;
+  material.side = material.side ?? THREE.FrontSide;
+  material.needsUpdate = true;
+}
+
+/**
  * glTF base colors are untextured flat factors, so the shading has to carry
  * the material read. Tune each authored slot toward its real-world response
  * instead of letting everything resolve to the same matte grey.
@@ -101,6 +144,25 @@ function tunePbrMaterial(material, name) {
   const key = String(name ?? "").toLowerCase();
   material.envMapIntensity = 0.3;
   material.side = material.side ?? THREE.FrontSide;
+
+  // 单贴图模型 (Tripo 生成的那批: 战象/骑兵/老兵/战车/火炮) 的材质名是
+  //   tripo_1d10b4c9_2f99_46df_b48...
+  // 随机 UUID, 跟下面所有按关键词匹配的分支都对不上, 会全部掉进兜底分支。
+  // 后果实测: 战象 roughness 被兜底的 ×1.05 推到 0.99 —— 大象皮肤完全没有
+  // 高光, 像粉笔; 骑兵/老兵/战车/火炮则是 metalness=0 且 roughness 恒定,
+  // 于是钢铁兵器和皮甲在所有角度都呈现同一种塑料感。
+  //
+  // 对这类"只有一张 baseColor、没有 roughness/metallic 贴图"的模型, 靠
+  // 材质名无从分类 (一张贴图里同时画着皮、木、铁)。这里改用贴图本身驱动:
+  // 用它的亮度作为粗糙度来源 —— 画面里暗部通常是皮革/木头(更粗糙), 亮部
+  // 通常是金属高光/铜饰(更光滑)。这比给一个全局常数接近真实得多。
+  const isSingleMapModel =
+    key.startsWith("tripo") || (!material.roughnessMap && !material.metalnessMap);
+
+  if (isSingleMapModel && material.map && !material.roughnessMap) {
+    applySingleMapMaterial(material);
+    return;
+  }
 
   if (key.includes("steel")) {
     material.metalness = Math.min(0.72, (material.metalness ?? 0.55) * 1.02);

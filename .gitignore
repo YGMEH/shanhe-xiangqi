@@ -5,6 +5,10 @@ output/
 outputs/
 tmp/
 
+# Python 工具脚本的字节码缓存(会造成无意义的新增文件)
+__pycache__/
+*.pyc
+
 .DS_Store
 Thumbs.db
 *.log

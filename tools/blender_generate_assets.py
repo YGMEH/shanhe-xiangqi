@@ -285,7 +285,53 @@ def pose(armature, frame, rotations=None, offsets=None):
         bone.keyframe_insert("location", frame=frame)
 
 
-def make_action(armature, name, frames, keys):
+def iter_fcurves(action):
+    """兼容 Blender 4.x 的槽位式动作与旧式动作, 统一取出所有 fcurve。"""
+    layers = getattr(action, "layers", None)
+    if layers:
+        found = False
+        for layer in layers:
+            for strip in layer.strips:
+                for bag in getattr(strip, "channelbags", []):
+                    for fc in bag.fcurves:
+                        found = True
+                        yield fc
+        if found:
+            return
+    for fc in action.fcurves:
+        yield fc
+
+
+def apply_easing(action, easing):
+    """给动作里每个关键帧设置插值与缓动。
+
+    easing: {帧号: 规格}。规格是字符串或 dict:
+      "LINEAR" / "CONSTANT" / "BEZIER"
+      {"interp": "BEZIER", "hl": "AUTO_CLAMPED", "hr": "VECTOR"}
+      {"interp": "LINEAR", "easing": "EASE_IN"}   # 配合 BACK/ELASTIC 等
+    未列出的帧默认 BEZIER + AUTO_CLAMPED(平滑自然)。
+    """
+    for fc in iter_fcurves(action):
+        for kp in fc.keyframe_points:
+            frame = int(round(kp.co[0]))
+            spec = easing.get(frame)
+            if spec is None:
+                kp.interpolation = "BEZIER"
+                kp.handle_left_type = "AUTO_CLAMPED"
+                kp.handle_right_type = "AUTO_CLAMPED"
+                continue
+            if isinstance(spec, str):
+                spec = {"interp": spec}
+            kp.interpolation = spec.get("interp", "BEZIER")
+            if "easing" in spec:
+                kp.easing = spec["easing"]
+            if kp.interpolation == "BEZIER":
+                kp.handle_left_type = spec.get("hl", "AUTO_CLAMPED")
+                kp.handle_right_type = spec.get("hr", "AUTO_CLAMPED")
+        fc.update()
+
+
+def make_action(armature, name, frames, keys, easing=None, fps=24):
     action = bpy.data.actions.new(name)
     if armature.animation_data is None:
         armature.animation_data_create()
@@ -294,16 +340,28 @@ def make_action(armature, name, frames, keys):
         for slot in action.slots:
             armature.animation_data.action_slot = slot
             break
-    for frame, rotations, offsets in keys:
+    for key in keys:
+        frame, rotations, offsets = key[0], key[1], key[2]
         pose(armature, frame, rotations, offsets)
+    apply_easing(action, easing or {})
     action.use_fake_user = True
     bpy.context.scene.frame_start = 1
     bpy.context.scene.frame_end = frames
+    bpy.context.scene.render.fps = fps
     return action
 
 
 def standard_actions(armature, extras=()):
-    """Idle / Move / Attack / Defeat built from shared biped bones plus extras."""
+    """Idle / Move / Attack / Defeat, 共用于双足骨骼, 缺少的骨骼自动跳过。
+
+    动作设计要点(相对旧版的改进):
+      - 旧版每个动作只有 3-5 个关键帧且全部使用默认缓动, 结果是一律"软绵绵"。
+      - 新版为每个动作铺设完整的关键帧结构, 并逐帧指定插值:
+          * 蓄力段用 BEZIER 慢入, 打击段用 LINEAR 制造"啪"的急停感
+          * 倒地受击瞬间用 LINEAR, 下坠段用 VECTOR 手柄模拟重力加速
+          * 落地后有回弹与定格, 不是一路沉到底
+      - Idle/Move 首尾关键帧数值完全一致, 保证循环播放不跳帧。
+    """
 
     def merge(base, *overrides):
         result = dict(base)
@@ -311,54 +369,87 @@ def standard_actions(armature, extras=()):
             result.update(override)
         return result
 
+    # ---------------- Idle: 48 帧(2.0 秒) 一次呼吸 + 轻微重心游移, 首尾一致可循环
     idle_base = {"spine": (0, 0, 0), "head": (0, 0, 0)}
     make_action(
         armature,
         "Idle",
-        40,
+        48,
         [
             (1, merge(idle_base, {"arm.R": (2, 0, 2), "arm.L": (-2, 0, -2)}), {"root": (0, 0, 0)}),
-            (20, merge(idle_base, {"spine": (1, 0, 2), "arm.R": (5, 0, 3), "arm.L": (-5, 0, -3)}), {"root": (0, 0, 0.025)}),
-            (40, merge(idle_base, {"arm.R": (2, 0, 2), "arm.L": (-2, 0, -2)}), {"root": (0, 0, 0)}),
+            (12, merge(idle_base, {"spine": (-1.0, 0, 1.2), "head": (-0.5, 0, 0.5), "arm.R": (3.5, 0, 2.6), "arm.L": (-3.5, 0, -2.6)}), {"root": (0, 0, 0.012)}),
+            (16, merge(idle_base, {"spine": (-1.8, 0, 0), "head": (-1.2, 0, 0), "arm.R": (4.2, 0, 3.0), "arm.L": (-4.2, 0, -3.0)}), {"root": (0, 0, 0.022)}),
+            (24, merge(idle_base, {"spine": (-0.6, 0, -0.8), "head": (0.2, 0, -0.4), "arm.R": (3.0, 0, 2.2), "arm.L": (-3.0, 0, -2.2)}), {"root": (0, 0, 0.008)}),
+            (32, merge(idle_base, {"spine": (0.4, 0, -1.2), "head": (0.8, 0, -0.5), "arm.R": (2.2, 0, 1.8), "arm.L": (-2.2, 0, -1.8)}), {"root": (0, 0, 0.002)}),
+            (40, merge(idle_base, {"spine": (-0.4, 0, 0.4), "head": (-0.2, 0, 0.2), "arm.R": (3.0, 0, 2.4), "arm.L": (-3.0, 0, -2.4)}), {"root": (0, 0, 0.010)}),
+            (48, merge(idle_base, {"arm.R": (2, 0, 2), "arm.L": (-2, 0, -2)}), {"root": (0, 0, 0)}),
         ],
+        easing={},  # 呼吸全程平滑
     )
 
+    # ---------------- Move: 33 帧(1.375 秒) 完整步行周期
+    # 触点(1) -> 下沉(5) -> 中间(9) -> 上升(13) -> 反向触点(17) ... 重心一周期起伏两次
     make_action(
         armature,
         "Move",
-        32,
+        33,
         [
-            (1, {"arm.R": (6, 0, 0), "arm.L": (-6, 0, 0), "leg.R": (16, 0, 0), "leg.L": (-16, 0, 0)}, {"root": (0, 0, 0)}),
-            (8, {"arm.R": (22, 0, 0), "arm.L": (-22, 0, 0), "leg.R": (-16, 0, 0), "leg.L": (16, 0, 0), "spine": (0, 0, 3)}, {"root": (0, 0, 0.05)}),
-            (16, {"arm.R": (6, 0, 0), "arm.L": (-6, 0, 0), "leg.R": (16, 0, 0), "leg.L": (-16, 0, 0)}, {"root": (0, 0, 0)}),
-            (24, {"arm.R": (-14, 0, 0), "arm.L": (14, 0, 0), "leg.R": (-16, 0, 0), "leg.L": (16, 0, 0), "spine": (0, 0, -3)}, {"root": (0, 0, 0.05)}),
-            (32, {"arm.R": (6, 0, 0), "arm.L": (-6, 0, 0), "leg.R": (16, 0, 0), "leg.L": (-16, 0, 0)}, {"root": (0, 0, 0)}),
+            (1, {"arm.R": (14, 0, 0), "arm.L": (-14, 0, 0), "leg.R": (20, 0, 0), "leg.L": (-20, 0, 0), "spine": (0, 0, 4), "head": (0, 0, -2)}, {"root": (0, 0, 0.0)}),
+            (5, {"arm.R": (20, 0, 0), "arm.L": (-20, 0, 0), "leg.R": (10, 0, 0), "leg.L": (-10, 0, 0), "spine": (1, 0, 3), "head": (0, 0, -1.5)}, {"root": (0, 0, -0.035)}),
+            (9, {"arm.R": (16, 0, 0), "arm.L": (-16, 0, 0), "leg.R": (-2, 0, 0), "leg.L": (2, 0, 0), "spine": (0, 0, 0), "head": (0, 0, 0)}, {"root": (0, 0, 0.012)}),
+            (13, {"arm.R": (4, 0, 0), "arm.L": (-4, 0, 0), "leg.R": (-14, 0, 0), "leg.L": (14, 0, 0), "spine": (-1, 0, -2), "head": (0, 0, 1)}, {"root": (0, 0, 0.045)}),
+            (17, {"arm.R": (-14, 0, 0), "arm.L": (14, 0, 0), "leg.R": (-20, 0, 0), "leg.L": (20, 0, 0), "spine": (0, 0, -4), "head": (0, 0, 2)}, {"root": (0, 0, 0.0)}),
+            (21, {"arm.R": (-20, 0, 0), "arm.L": (20, 0, 0), "leg.R": (-10, 0, 0), "leg.L": (10, 0, 0), "spine": (1, 0, -3), "head": (0, 0, 1.5)}, {"root": (0, 0, -0.035)}),
+            (25, {"arm.R": (-16, 0, 0), "arm.L": (16, 0, 0), "leg.R": (2, 0, 0), "leg.L": (-2, 0, 0), "spine": (0, 0, 0), "head": (0, 0, 0)}, {"root": (0, 0, 0.012)}),
+            (29, {"arm.R": (-4, 0, 0), "arm.L": (4, 0, 0), "leg.R": (14, 0, 0), "leg.L": (-14, 0, 0), "spine": (-1, 0, 2), "head": (0, 0, -1)}, {"root": (0, 0, 0.045)}),
+            (33, {"arm.R": (14, 0, 0), "arm.L": (-14, 0, 0), "leg.R": (20, 0, 0), "leg.L": (-20, 0, 0), "spine": (0, 0, 4), "head": (0, 0, -2)}, {"root": (0, 0, 0.0)}),
         ],
+        easing={
+            5: {"interp": "BEZIER", "hl": "VECTOR"},   # 落脚后快速下沉
+            17: {"interp": "BEZIER", "hl": "VECTOR"},
+        },
     )
 
+    # ---------------- Attack: 30 帧(1.25 秒) 蓄力 -> 急停下劈 -> 过冲 -> 收势
     make_action(
         armature,
         "Attack",
-        22,
+        30,
         [
-            (1, {"spine": (0, 0, 0), "arm.R": (0, 0, 0), "arm.L": (0, 0, 0)}, {"root": (0, 0, 0)}),
-            (7, {"spine": (-6, 0, -6), "arm.R": (-16, 12, 0), "arm.L": (10, 0, 0), "head": (-4, 0, 0)}, {"root": (0, 0, -0.03)}),
-            (11, {"spine": (5, 0, 8), "arm.R": (-62, 6, 0), "arm.L": (-24, 0, 0), "head": (6, 0, 0), "leg.R": (14, 0, 0)}, {"root": (0, 0, 0.10)}),
-            (16, {"spine": (3, 0, 5), "arm.R": (-42, 4, 0), "arm.L": (-16, 0, 0)}, {"root": (0, 0, 0.05)}),
-            (22, {"spine": (0, 0, 0), "arm.R": (0, 0, 0), "arm.L": (0, 0, 0)}, {"root": (0, 0, 0)}),
+            (1, {"spine": (0, 0, 0), "arm.R": (0, 0, 0), "arm.L": (0, 0, 0), "head": (0, 0, 0), "leg.R": (0, 0, 0)}, {"root": (0, 0, 0)}),
+            (7, {"spine": (-10, 0, -8), "arm.R": (-26, 16, -6), "arm.L": (12, 0, 4), "head": (-6, 0, -4), "leg.R": (-6, 0, 0)}, {"root": (0, 0, -0.045)}),
+            (10, {"spine": (-12, 0, -9), "arm.R": (-30, 18, -8), "arm.L": (14, 0, 5), "head": (-7, 0, -5), "leg.R": (-7, 0, 0)}, {"root": (0, 0, -0.05)}),
+            (13, {"spine": (8, 0, 12), "arm.R": (-70, 4, 10), "arm.L": (-28, 0, -8), "head": (8, 0, 6), "leg.R": (16, 0, 0)}, {"root": (0, 0, 0.11)}),
+            (15, {"spine": (11, 0, 15), "arm.R": (-80, 2, 12), "arm.L": (-32, 0, -10), "head": (10, 0, 7), "leg.R": (18, 0, 0)}, {"root": (0, 0, 0.13)}),
+            (20, {"spine": (5, 0, 7), "arm.R": (-46, 3, 6), "arm.L": (-16, 0, -4), "head": (4, 0, 3), "leg.R": (8, 0, 0)}, {"root": (0, 0, 0.05)}),
+            (30, {"spine": (0, 0, 0), "arm.R": (0, 0, 0), "arm.L": (0, 0, 0), "head": (0, 0, 0), "leg.R": (0, 0, 0)}, {"root": (0, 0, 0)}),
         ],
+        easing={
+            10: "LINEAR",   # 蓄力顶点之后立刻全速出手(线性 = 无缓入, 像"啪"地一下)
+            13: "LINEAR",   # 过冲段同样保持高速
+            15: {"interp": "BEZIER", "hl": "VECTOR"},  # 到过冲顶点后开始减速收势
+        },
     )
 
+    # ---------------- Defeat: 34 帧(1.417 秒) 受击 -> 踉跄 -> 加速下坠 -> 触地回弹 -> 定格
     make_action(
         armature,
         "Defeat",
-        26,
+        34,
         [
-            (1, {"spine": (0, 0, 0)}, {"root": (0, 0, 0)}),
-            (8, {"spine": (20, 0, 14), "head": (12, 0, 0), "arm.R": (24, 0, 20), "arm.L": (-18, 0, -20)}, {"root": (0, 0, -0.12)}),
-            (18, {"spine": (58, 0, 30), "head": (34, 0, 0), "arm.R": (40, 0, 30), "arm.L": (-30, 0, -30)}, {"root": (0, 0, -0.46)}),
-            (26, {"spine": (72, 0, 38), "head": (40, 0, 0), "arm.R": (44, 0, 34), "arm.L": (-34, 0, -34)}, {"root": (0, 0, -0.66)}),
+            (1, {"spine": (0, 0, 0), "head": (0, 0, 0), "arm.R": (0, 0, 0), "arm.L": (0, 0, 0), "leg.R": (0, 0, 0), "leg.L": (0, 0, 0)}, {"root": (0, 0, 0)}),
+            (4, {"spine": (-14, 0, -6), "head": (-14, 0, -4), "arm.R": (-18, 0, -10), "arm.L": (16, 0, 10), "leg.R": (-8, 0, 0), "leg.L": (-8, 0, 0)}, {"root": (0, 0, -0.04)}),
+            (9, {"spine": (6, 0, 8), "head": (10, 0, 4), "arm.R": (20, 0, 14), "arm.L": (-14, 0, -14), "leg.R": (10, 0, 0), "leg.L": (-10, 0, 0)}, {"root": (0, 0, -0.10)}),
+            (17, {"spine": (34, 0, 20), "head": (24, 0, 8), "arm.R": (34, 0, 24), "arm.L": (-26, 0, -24), "leg.R": (24, 0, 0), "leg.L": (-24, 0, 0)}, {"root": (0, 0, -0.30)}),
+            (24, {"spine": (62, 0, 32), "head": (36, 0, 12), "arm.R": (42, 0, 30), "arm.L": (-34, 0, -30), "leg.R": (34, 0, 0), "leg.L": (-34, 0, 0)}, {"root": (0, 0, -0.62)}),
+            (28, {"spine": (56, 0, 30), "head": (32, 0, 11), "arm.R": (38, 0, 28), "arm.L": (-30, 0, -28), "leg.R": (30, 0, 0), "leg.L": (-30, 0, 0)}, {"root": (0, 0, -0.56)}),
+            (34, {"spine": (66, 0, 36), "head": (40, 0, 13), "arm.R": (45, 0, 33), "arm.L": (-36, 0, -32), "leg.R": (36, 0, 0), "leg.L": (-36, 0, 0)}, {"root": (0, 0, -0.68)}),
         ],
+        easing={
+            4: "LINEAR",                                     # 受击是瞬间的, 不能有缓入
+            17: {"interp": "BEZIER", "hl": "VECTOR"},        # 下坠段重力加速
+            24: {"interp": "BEZIER", "hl": "VECTOR"},        # 触地硬停, 然后回弹
+        },
     )
 
     for extra_name, extra_frames, extra_keys in extras:

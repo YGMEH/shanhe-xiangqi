@@ -28,3 +28,12 @@ are from Kenney's "Impact Sounds" pack, released under CC0.
 
 Creator: Kenney (https://kenney.nl/)
 License: https://creativecommons.org/publicdomain/zero/1.0/
+
+## Kenney RPG Audio
+
+The curated foley, cloth, metal, weapon, and footstep samples under
+`public/assets/audio/kenney-rpg/` are from Kenney's "RPG Audio" pack.
+
+Creator: Kenney (https://kenney.nl/)
+License: Creative Commons Zero (CC0)
+Source: https://kenney.nl/assets/rpg-audio

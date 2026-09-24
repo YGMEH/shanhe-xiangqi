@@ -7,7 +7,7 @@ import {
   algebraic,
   oppositeSide,
 } from "./constants.js";
-import { BoardState } from "./board.js";
+import { BoardState, createInitialBoard, createPiece } from "./board.js";
 import {
   gameStatus,
   getLegalMoves,
@@ -42,9 +42,9 @@ export class GameController {
       red: [],
       black: [],
     };
-    this.flyingMove = false;
     this.lastMove = null;
     this.aiTimer = null;
+    this.aiGeneration = 0;
     this.autoSaveEnabled = true;
     this.positionKeys = [];
     this.campaign = null;
@@ -53,14 +53,20 @@ export class GameController {
 
   restore(save) {
     if (!save) return false;
+    this.cancelPendingAi();
     this.playerSide = save.playerSide;
     this.aiSide = save.aiSide;
     this.difficulty = save.difficulty;
     this.mode = save.mode;
     this.state = new BoardState(save.pieces, save.turn, []);
-    this.captures = save.captures ?? { red: [], black: [] };
     this.moveHistory = save.history ?? [];
+    // 从着法史重建战利品, 而不是直接信任存档里的 captures 字段。
+    // 旧版本把吃子记到了对方名下(captures[被吃方] 而非 captures[吃子方]),
+    // 直接沿用会让读档后的兵力与俘获栏继续错一位; history[].side/captured
+    // 始终是可信的, 顺手也就完成了旧存档迁移。
+    this.captures = rebuildCaptures(this.moveHistory, save.captures);
     this.lastMove = save.lastMove ?? null;
+    this.scene.setLastMove?.(this.lastMove);
     this.positionKeys = Array.isArray(save.positionKeys)
       ? save.positionKeys
       : [positionKey(this.state.pieces, this.state.turn)];
@@ -74,7 +80,7 @@ export class GameController {
     this.scene.syncBoard(this.state);
     this.scene.setSelected(null);
     this.scene.hideCheck();
-    this.ui.renderCaptures(this.captures);
+    this.ui.renderCaptures(this.captures, this.state);
     this.ui.renderHistory(this.moveHistory);
     this.ui.hideResult();
     this.ui.hideInspector();
@@ -85,8 +91,7 @@ export class GameController {
       status.inCheck ? "将帅受危，必须解围" : "上局已续接"
     );
     if (this.mode === "ai" && this.state.turn === this.aiSide) {
-      this.busy = true;
-      this.aiTimer = window.setTimeout(() => this.makeAiMove(), 540);
+      this.scheduleAiMove(540);
     }
     return true;
   }
@@ -109,11 +114,19 @@ export class GameController {
     pieces,
     campaign = null,
   } = {}) {
+    this.cancelPendingAi();
     this.playerSide = playerSide;
     this.aiSide = oppositeSide(playerSide);
     this.difficulty = difficulty;
     this.mode = mode;
-    this.state = new BoardState(pieces);
+    // 残局/战役剧本传入的棋子往往没有 id(剧本只写 type/side/x/y),
+    // 旧代码原样塞给 BoardState, 导致 state 里所有棋子 id 全是 undefined:
+    // pieceById 永远找不到目标、渲染层 actors 全挂在 null 键上互相覆盖,
+    // 实测残局下整盘只剩一枚棋子可以点。这里统一补 id。
+    const normalizedPieces = pieces
+      ? pieces.map((piece) => (piece.id ? piece : createPiece(piece.type, piece.side, piece.x, piece.y, piece)))
+      : createInitialBoard();
+    this.state = new BoardState(normalizedPieces);
     this.selected = null;
     this.selectedMoves = [];
     this.undoStack = [];
@@ -123,15 +136,15 @@ export class GameController {
     this.gameOver = false;
     this.resultDismissed = false;
     this.lastMove = null;
+    this.scene.setLastMove?.(null);
     this.positionKeys = [positionKey(this.state.pieces, this.state.turn)];
     this.campaign = campaign;
     this.lastWinner = null;
-    window.clearTimeout(this.aiTimer);
     this.scene.syncBoard(this.state);
     this.scene.setSelected(null);
     this.scene.hideCheck();
     this.ui.renderTurn(this.state.turn, "请选择一枚棋子");
-    this.ui.renderCaptures(this.captures);
+    this.ui.renderCaptures(this.captures, this.state);
     this.ui.renderHistory(this.moveHistory);
     this.ui.hideResult();
     this.ui.hideInspector();
@@ -139,6 +152,21 @@ export class GameController {
 
   isHumanTurn() {
     return this.mode === "local" || this.state.turn === this.playerSide;
+  }
+
+  cancelPendingAi() {
+    if (this.aiTimer !== null) window.clearTimeout(this.aiTimer);
+    this.aiTimer = null;
+    this.aiGeneration += 1;
+  }
+
+  scheduleAiMove(delay) {
+    this.cancelPendingAi();
+    const generation = this.aiGeneration;
+    this.aiTimer = window.setTimeout(() => {
+      this.aiTimer = null;
+      this.makeAiMove(generation);
+    }, delay);
   }
 
   selectPiece(piece) {
@@ -194,6 +222,15 @@ export class GameController {
     }
 
     if (target) {
+      // 已选中棋子时点了一枚吃不掉的敌子。
+      // 旧实现直接交给 selectPiece(), 而 selectPiece 会因"对方阵营"弹
+      // "尚未轮到该军行动" —— 可这时明明轮到玩家, 提示是错的, 玩家会以为
+      // 轮次坏了。这里按"落点非法"处理。
+      if (target.side !== this.state.turn) {
+        this.ui.showToast("该落点不符合行棋规则");
+        this.audio.cancel();
+        return;
+      }
       this.selectPiece(target);
     } else {
       this.clearSelection();
@@ -202,16 +239,29 @@ export class GameController {
   }
 
   async performMove(move, { byAi = false, skipSync = false } = {}) {
-    if ((this.busy && !byAi) || this.gameOver) return;
+    if (this.busy || this.gameOver) return false;
     const movingPiece = this.state.pieceById(move.pieceId);
     if (!movingPiece) {
-      this.busy = false;
       this.ui.showToast("行棋目标已失效");
-      return;
+      return false;
+    }
+    const legalMove = isMoveLegal(this.state, movingPiece.id, move.x, move.y);
+    if (!legalMove) {
+      this.ui.showToast(
+        movingPiece.side === this.state.turn
+          ? "该落点不符合行棋规则"
+          : "尚未轮到该军行动"
+      );
+      return false;
     }
     this.busy = true;
+    this.clearSelection();
     try {
-      await this.runMove(move, { byAi, skipSync, movingPiece });
+      await this.runMove(
+        { ...legalMove, pieceId: movingPiece.id },
+        { byAi, skipSync, movingPiece }
+      );
+      return true;
     } catch (error) {
       // 关键: 这里面的动画/音效都是 await 的, 任意一步抛错都会让 busy 永远
       // 停在 true, 之后所有点击都被开头的 if (this.busy) 拦掉, 表现为
@@ -219,6 +269,8 @@ export class GameController {
       // 用一个兜底释放, 保证一局里不会因为一次动画异常而彻底锁死。
       console.error("行棋过程出错, 已恢复可下子状态:", error);
       this.ui.showToast("行棋动作异常, 已恢复");
+      this.scene.syncBoard(this.state);
+      return false;
     } finally {
       this.busy = false;
     }
@@ -228,20 +280,6 @@ export class GameController {
     const captured = this.state.pieceAt(move.x, move.y);
     const from = { x: movingPiece.x, y: movingPiece.y };
     const to = { x: move.x, y: move.y };
-
-    const snapshot = {
-      pieces: this.state.serialize(),
-      turn: this.state.turn,
-      captures: {
-        red: [...this.captures.red],
-        black: [...this.captures.black],
-      },
-      history: [...this.moveHistory],
-      lastMove: this.lastMove,
-      positionKeys: [...this.positionKeys],
-    };
-    this.undoStack.push(snapshot);
-    if (this.undoStack.length > MAX_HISTORY) this.undoStack.shift();
 
     const attackKind = movingPiece.type;
     const isCannon = attackKind === PIECE_TYPES.CANNON;
@@ -295,6 +333,20 @@ export class GameController {
       await this.scene.animateMove(movingPiece, from, to, { duration: 0.3 });
     }
 
+    const snapshot = {
+      pieces: this.state.serialize(),
+      turn: this.state.turn,
+      captures: {
+        red: [...this.captures.red],
+        black: [...this.captures.black],
+      },
+      history: [...this.moveHistory],
+      lastMove: this.lastMove,
+      positionKeys: [...this.positionKeys],
+    };
+    this.undoStack.push(snapshot);
+    if (this.undoStack.length > MAX_HISTORY) this.undoStack.shift();
+
     this.state.move(movingPiece.id, to.x, to.y, captured);
     this.scene.syncBoard(this.state, { skipPosition: true });
     const actor = this.scene.actors.get(movingPiece.id);
@@ -303,13 +355,22 @@ export class GameController {
       actor.group.position.set(position.x, actor.baseHeight, position.z);
     }
     if (captured) {
-      this.captures[oppositeSide(movingPiece.side)].push(captured);
+      // captures[side] 统一表示"该方俘获的战利品"(棋子归属方为对方),
+      // 与 index.html 的"蜀军俘获/魏军俘获"和 ui.renderCaptures 的
+      // 渲染口径一致。旧实现写入 oppositeSide(...) 是把它当成"该方的损失",
+      // 结果红方吃子会记到黑方名下, 兵力也扣错一边。
+      this.captures[movingPiece.side].push(captured);
       // 吃子让配乐紧张起来: 每吃一子抬一档, 到 1.0 封顶。
-      // 用棋子总数反推已吃数量, 比维护一个计数器更不容易和悔棋/重开失同步。
-      const totalAlive = this.state.pieces.length;
-      const eaten = Math.max(0, 32 - totalAlive);
+      // 直接数双方战利品总数 = 本局已吃子数, 比用 32 减存活数更稳:
+      // 残局战役开局就不足 32 子, 旧算法会让配乐一上来就顶到最大强度。
+      const eaten = this.captures.red.length + this.captures.black.length;
       this.audio.setMusicIntensity?.(0.6 + eaten * 0.045);
-      await this.scene.defeatActor(captured.id);
+      try {
+        await this.scene.defeatActor(captured.id);
+      } catch (error) {
+        console.error("吃子退场动画失败, 已按当前棋局重新同步:", error);
+        this.scene.syncBoard(this.state);
+      }
     }
 
     const notation = this.formatMove(movingPiece, from, to, captured);
@@ -321,8 +382,10 @@ export class GameController {
       captured,
       at: Date.now(),
     });
-    this.lastMove = { from, to, pieceId: movingPiece.id };
-    this.ui.renderCaptures(this.captures);
+    // side 用于渲染"上一手"标记的配色(红方暖色/黑方冷色), 旧存档没有该字段时渲染层会退回默认配色。
+    this.lastMove = { from, to, pieceId: movingPiece.id, side: movingPiece.side };
+    this.scene.setLastMove?.(this.lastMove);
+    this.ui.renderCaptures(this.captures, this.state);
     this.ui.renderHistory(this.moveHistory);
 
     this.state.turn = oppositeSide(movingPiece.side);
@@ -410,22 +473,39 @@ export class GameController {
     }
 
     if (this.mode === "ai" && this.state.turn === this.aiSide) {
-      this.aiTimer = window.setTimeout(() => this.makeAiMove(), 260);
+      this.scheduleAiMove(260);
     }
   }
 
-  async makeAiMove() {
-    if (this.gameOver || this.mode !== "ai") return;
+  async makeAiMove(generation = this.aiGeneration) {
+    if (
+      generation !== this.aiGeneration ||
+      this.busy ||
+      this.gameOver ||
+      this.mode !== "ai" ||
+      this.state.turn !== this.aiSide
+    ) return false;
+    const stateAtStart = this.state;
+    this.busy = true;
     this.ui.renderTurn(this.aiSide, "敌军推演中");
     await wait(220);
-    const move = chooseAiMove(this.state, this.aiSide, this.difficulty);
-    if (!move) {
-      this.busy = false;
-      this.resolveTurnState();
-      return;
+    if (
+      generation !== this.aiGeneration ||
+      this.state !== stateAtStart ||
+      this.gameOver ||
+      this.mode !== "ai" ||
+      this.state.turn !== this.aiSide
+    ) {
+      if (generation === this.aiGeneration) this.busy = false;
+      return false;
     }
+    const move = chooseAiMove(this.state, this.aiSide, this.difficulty);
     this.busy = false;
-    await this.performMove(move, { byAi: true });
+    if (!move) {
+      this.resolveTurnState();
+      return false;
+    }
+    return this.performMove(move, { byAi: true });
   }
 
   undo() {
@@ -435,6 +515,7 @@ export class GameController {
       return;
     }
 
+    this.cancelPendingAi();
     let snapshot = this.undoStack.pop();
     if (
       this.mode === "ai" &&
@@ -448,6 +529,7 @@ export class GameController {
     this.captures = snapshot.captures;
     this.moveHistory = snapshot.history;
     this.lastMove = snapshot.lastMove;
+    this.scene.setLastMove?.(this.lastMove);
     this.positionKeys = snapshot.positionKeys ?? [
       positionKey(this.state.pieces, this.state.turn),
     ];
@@ -455,17 +537,18 @@ export class GameController {
     this.resultDismissed = false;
     this.busy = false;
     this.selected = null;
+    this.selectedMoves = [];
     this.scene.syncBoard(this.state);
     this.scene.setSelected(null);
     this.scene.hideCheck();
-    this.ui.renderCaptures(this.captures);
+    this.ui.renderCaptures(this.captures, this.state);
     this.ui.renderHistory(this.moveHistory);
     this.ui.hideResult();
     this.ui.hideInspector();
     this.ui.renderTurn(this.state.turn, "棋局已回退");
     this.audio.cancel();
     if (this.mode === "ai" && this.state.turn === this.aiSide) {
-      this.aiTimer = window.setTimeout(() => this.makeAiMove(), 420);
+      this.scheduleAiMove(420);
     }
     this.commit();
   }
@@ -505,4 +588,21 @@ export class GameController {
 
 function wait(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+/**
+ * 按"吃子方持有战利品"的口径重建 captures。
+ * 只有当着法史缺失或为空(老存档/异常数据)时才退回存档里的原始字段。
+ */
+function rebuildCaptures(history, fallback) {
+  const empty = { red: [], black: [] };
+  if (!Array.isArray(history) || history.length === 0) {
+    return fallback ?? empty;
+  }
+  const captures = { red: [], black: [] };
+  history.forEach((move) => {
+    if (!move?.captured || !captures[move.side]) return;
+    captures[move.side].push(move.captured);
+  });
+  return captures;
 }

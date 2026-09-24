@@ -62,9 +62,9 @@ export const PIECE_NAMES = Object.freeze({
 export const PIECE_DESCRIPTIONS = Object.freeze({
   [PIECE_TYPES.GENERAL]: "坐镇九宫，一步一格",
   [PIECE_TYPES.ADVISOR]: "斜守中军，不可出宫",
-  [PIECE_TYPES.ELEPHANT]: "斜行两格，山地步伐",
+  [PIECE_TYPES.ELEPHANT]: "斜行田字，不可过河",
   [PIECE_TYPES.HORSE]: "跃马破阵，蹩马腿后受阻",
-  [PIECE_TYPES.CHARIOT]: "横冲直撞，过河须走石桥",
+  [PIECE_TYPES.CHARIOT]: "横冲直撞，直线畅通即可走",
   [PIECE_TYPES.CANNON]: "隔一子炮架，远程轰击",
   [PIECE_TYPES.SOLDIER]: "稳步向前，过河可横击",
 });

@@ -187,12 +187,19 @@ export class AudioEngine {
   }
 
   select() {
-    this.tone({ frequency: 470, duration: 0.07, type: "triangle", volume: 0.055 });
-    this.tone({ frequency: 710, duration: 0.1, type: "sine", volume: 0.028 });
+    const played = this.playRandomSample(["metal-click-1", "handle-coins-1"], {
+      volume: 0.12,
+      rate: 1.16,
+    });
+    if (!played) {
+      this.tone({ frequency: 470, duration: 0.07, type: "triangle", volume: 0.055 });
+      this.tone({ frequency: 710, duration: 0.1, type: "sine", volume: 0.028 });
+    }
   }
 
   cancel() {
-    this.tone({ frequency: 220, duration: 0.08, type: "triangle", volume: 0.035 });
+    const played = this.playSample("metal-click-1", { volume: 0.07, rate: 0.78 });
+    if (!played) this.tone({ frequency: 220, duration: 0.08, type: "triangle", volume: 0.035 });
   }
 
   /**
@@ -212,21 +219,21 @@ export class AudioEngine {
   move(type) {
     const profiles = {
       // 步兵: 布鞋踩土, 最干最轻, 没有低频尾巴
-      soldier:  { pool: ["footstep-grass-1", "footstep-wood-1"], volume: 0.13, rate: 1.18, tail: 0 },
+      soldier:  { pool: ["footstep-grass-1", "footstep-wood-1", "footstep-rpg-1", "footstep-rpg-2"], volume: 0.13, rate: 1.18, tail: 0 },
       // 军师: 文士缓步 —— 音量最小、音调最高, 用料最"软"
       // 实测原来和骑兵撞在一起(中频 1917 vs 1734), 所以把它的
       // 音调再抬高、音量再压低, 和骑兵的"硬蹄"彻底分开
-      advisor:  { pool: ["footstep-grass-1"], volume: 0.075, rate: 1.42, tail: 0, soft: 0.05 },
+      advisor:  { pool: ["footstep-grass-1", "cloth-1", "cloth-2"], volume: 0.075, rate: 1.42, tail: 0, soft: 0.05 },
       // 将军: 重甲, 中频为主, 带一点金属摩擦
-      general:  { pool: ["footstep-wood-1", "move-wood-light-1"], volume: 0.21, rate: 0.86, tail: 0.10 },
+      general:  { pool: ["footstep-wood-1", "move-wood-light-1", "metal-latch-1"], volume: 0.21, rate: 0.86, tail: 0.10 },
       // 骑兵: 马蹄双击, 高频清脆 + 短促蹄响
-      horse:    { pool: ["move-wood-light-1"], volume: 0.22, rate: 1.34, hoof: true, clip: 0.11 },
+      horse:    { pool: ["move-wood-light-1", "footstep-rpg-1"], volume: 0.22, rate: 1.34, hoof: true, clip: 0.11 },
       // 战车: 木轮滚动, 中低频为主
       // 原来和炮车几乎一样(低频 1732 vs 1737), 所以把两者的
       // 滚动成分和音调拉开: 战车偏高偏轻快, 炮车最低最闷
-      chariot:  { pool: ["move-wood-heavy-1"], volume: 0.25, rate: 1.16, hoof: true, rumble: 0.09, rumbleHz: 420 },
+      chariot:  { pool: ["move-wood-heavy-1", "metal-pot-heavy-1"], volume: 0.25, rate: 1.16, hoof: true, rumble: 0.09, rumbleHz: 420 },
       // 炮车: 最闷最沉, 低频轰鸣, 无马蹄
-      cannon:   { pool: ["move-wood-heavy-1"], volume: 0.30, rate: 0.62, rumble: 0.22, rumbleHz: 150 },
+      cannon:   { pool: ["move-wood-heavy-1", "metal-pot-heavy-1"], volume: 0.30, rate: 0.62, rumble: 0.22, rumbleHz: 150 },
       // 战象: 一声闷响带长尾, 低频最重
       //
       // 实测过一版: 只把音量调大、音调调到 0.50, 结果频谱距离和步兵只有 6,
@@ -343,21 +350,21 @@ export class AudioEngine {
   capture(type) {
     const profiles = {
       // 步兵: 短促的金属戳刺, 音调最高
-      soldier:  { pool: ["capture-metal-medium-1"], volume: 0.34, rate: 1.22, ring: 0.05, ringHz: 2600 },
+      soldier:  { pool: ["capture-metal-medium-1", "knife-slice-1"], volume: 0.34, rate: 1.22, ring: 0.05, ringHz: 2600 },
       // 军师: 最轻, 偏"格挡"而非"击杀"; 配音调更高的轻响和它区分
-      advisor:  { pool: ["capture-plate-medium-1"], volume: 0.22, rate: 1.40, ring: 0, soft: 0.06 },
+      advisor:  { pool: ["capture-plate-medium-1", "metal-click-1"], volume: 0.22, rate: 1.40, ring: 0, soft: 0.06 },
       // 将军: 重兵器劈砍, 有金属长鸣
-      general:  { pool: ["capture-metal-heavy-1"], volume: 0.48, rate: 0.98, ring: 0.12, ringHz: 1850 },
+      general:  { pool: ["capture-metal-heavy-1", "draw-knife-1"], volume: 0.48, rate: 0.98, ring: 0.12, ringHz: 1850 },
       // 骑兵: 冲锋撞击, 快而脆, 带蹄声余韵
-      horse:    { pool: ["capture-metal-medium-1", "impact-soft-heavy-1"], volume: 0.44, rate: 1.16, ring: 0.08, ringHz: 2200, thud: 0.10 },
+      horse:    { pool: ["capture-metal-medium-1", "impact-soft-heavy-1", "knife-slice-2"], volume: 0.44, rate: 1.16, ring: 0.08, ringHz: 2200, thud: 0.10 },
       // 战车: 木石碾压, 中低频
       //
       // 实测和炮车的吃子频谱距离只有 15, 两者共用同一组采样是主因。
       // 拆开: 战车保留"碾压"的宽频噪声(木轮碎裂), 炮车改用
       // 更纯的低频爆响 + 长时间金属余鸣, 一个"散"一个"沉"。
-      chariot:  { pool: ["capture-plate-heavy-1"], volume: 0.50, rate: 1.06, ring: 0.09, ringHz: 1500, thud: 0.13, thudHz: 78, debris: 0.13 },
+      chariot:  { pool: ["capture-plate-heavy-1", "metal-pot-heavy-1"], volume: 0.50, rate: 1.06, ring: 0.09, ringHz: 1500, thud: 0.13, thudHz: 78, debris: 0.13 },
       // 炮车: 铁件崩裂, 最闷的低频, 无碎屑噪声
-      cannon:   { pool: ["impact-mining-1", "capture-metal-heavy-1"], volume: 0.58, rate: 0.62, ring: 0.05, ringHz: 900, thud: 0.24, thudHz: 46 },
+      cannon:   { pool: ["impact-mining-1", "capture-metal-heavy-1", "metal-pot-heavy-1"], volume: 0.58, rate: 0.62, ring: 0.05, ringHz: 900, thud: 0.24, thudHz: 46 },
       // 战象: 最沉, 踩踏式的低频冲击, 没有金属声
       elephant: { pool: ["impact-soft-heavy-1", "impact-mining-1"], volume: 0.62, rate: 0.48, ring: 0, thud: 0.36, thudHz: 40 },
     };
@@ -414,13 +421,13 @@ export class AudioEngine {
   }
 
   cannon() {
-    const played = this.playSample("capture-plate-heavy-1", {
+    const played = this.playRandomSample(["capture-plate-heavy-1", "metal-pot-heavy-1"], {
       volume: 0.62,
       rate: 0.62,
     });
     if (played) {
       window.setTimeout(
-        () => this.playSample("impact-mining-1", { volume: 0.35, rate: 0.55 }),
+        () => this.playRandomSample(["impact-mining-1", "metal-pot-heavy-1"], { volume: 0.35, rate: 0.55 }),
         70
       );
       this.tone({ frequency: 54, duration: 0.5, type: "sine", volume: 0.12 });
@@ -438,6 +445,7 @@ export class AudioEngine {
   }
 
   check() {
+    if (this.playSample("metal-latch-1", { volume: 0.18, rate: 0.72 })) return;
     [0, 0.12, 0.24].forEach((offset, index) => {
       window.setTimeout(() => {
         this.tone({
@@ -451,6 +459,7 @@ export class AudioEngine {
   }
 
   victory() {
+    this.playSample("handle-coins-2", { volume: 0.08, rate: 0.72 });
     [261.63, 329.63, 392, 523.25].forEach((frequency, index) => {
       window.setTimeout(() => {
         this.tone({
@@ -465,6 +474,7 @@ export class AudioEngine {
   }
 
   defeat() {
+    this.playSample("cloth-1", { volume: 0.08, rate: 0.72 });
     [220, 185, 146.83].forEach((frequency, index) => {
       window.setTimeout(() => {
         this.tone({
@@ -627,4 +637,16 @@ const SAMPLE_LIBRARY = Object.freeze({
   "bell-heavy-1": "assets/audio/impact/bell-heavy-1.ogg",
   "footstep-grass-1": "assets/audio/impact/footstep-grass-1.ogg",
   "footstep-wood-1": "assets/audio/impact/footstep-wood-1.ogg",
+  "cloth-1": "assets/audio/kenney-rpg/cloth1.ogg",
+  "cloth-2": "assets/audio/kenney-rpg/cloth2.ogg",
+  "draw-knife-1": "assets/audio/kenney-rpg/drawKnife1.ogg",
+  "footstep-rpg-1": "assets/audio/kenney-rpg/footstep00.ogg",
+  "footstep-rpg-2": "assets/audio/kenney-rpg/footstep01.ogg",
+  "handle-coins-1": "assets/audio/kenney-rpg/handleCoins.ogg",
+  "handle-coins-2": "assets/audio/kenney-rpg/handleCoins2.ogg",
+  "knife-slice-1": "assets/audio/kenney-rpg/knifeSlice.ogg",
+  "knife-slice-2": "assets/audio/kenney-rpg/knifeSlice2.ogg",
+  "metal-click-1": "assets/audio/kenney-rpg/metalClick.ogg",
+  "metal-latch-1": "assets/audio/kenney-rpg/metalLatch.ogg",
+  "metal-pot-heavy-1": "assets/audio/kenney-rpg/metalPot1.ogg",
 });

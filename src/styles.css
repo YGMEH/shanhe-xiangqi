@@ -3,6 +3,9 @@
   font-family: "Noto Sans SC", "Microsoft YaHei UI", "PingFang SC", sans-serif;
   --ink: #081315;
   --ink-soft: rgba(8, 19, 21, 0.86);
+  /* 用于"网格容器底色"这类需要透出 1px 分隔线的场景。
+     --line 是给 1px 描边用的浅米色, 大面积填充会变成刺眼亮块, 不要混用。 */
+  --ink-deep: #071011;
   --stone: #d8c9a9;
   --stone-muted: #9b947e;
   --jade: #4e8b78;
@@ -87,6 +90,13 @@ select:focus-visible {
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
+}
+
+/* 隐藏后必须停掉无限动画: 常驻的 loading-pulse 会让浏览器每帧重绘这个
+   全屏覆盖层 (即使 opacity:0), 既白耗 CPU, 也会让 Playwright 等"等帧稳定"
+   的截图调用一直超时。 */
+.loading-layer.is-hidden .loading-mark {
+  animation: none;
 }
 
 .loading-mark {
@@ -610,8 +620,8 @@ select:focus-visible {
   overflow-y: auto;
   overscroll-behavior: contain;
   background:
-    linear-gradient(90deg, rgba(3, 9, 10, 0.94) 0%, rgba(4, 12, 12, 0.72) 38%, rgba(4, 12, 12, 0.22) 62%, rgba(3, 9, 10, 0.72) 100%),
-    linear-gradient(180deg, rgba(3, 9, 10, 0.55), rgba(3, 9, 10, 0.28) 40%, rgba(3, 9, 10, 0.86)),
+    linear-gradient(90deg, rgba(3, 9, 10, 0.80) 0%, rgba(4, 12, 12, 0.50) 45%, rgba(4, 12, 12, 0.14) 72%, rgba(3, 9, 10, 0.26) 100%),
+    linear-gradient(180deg, rgba(3, 9, 10, 0.36), rgba(3, 9, 10, 0.16) 45%, rgba(3, 9, 10, 0.62)),
     url("./assets/art/key-art.webp") center / cover no-repeat,
     #081213;
   opacity: 0;
@@ -699,8 +709,17 @@ select:focus-visible {
   grid-template-columns: 1fr 1fr;
   gap: 1px;
   margin-bottom: 24px;
-  background: var(--line);
+  /* 容器底色只用来"透出" 1px 的网格线, 必须取深色。
+     原先写的是 var(--line) —— 那是 22% 透明度的浅米色, 本意是画 1px 分隔线;
+     一旦铺满整格就成了刺眼的亮块。这里 3 个 label 填 2 列网格, 第 4 格没有
+     label 覆盖, 那块裸色就是这样暴露出来的。 */
+  background: var(--ink-deep);
   border: 1px solid var(--line);
+}
+
+/* 第 3 项跨两列: 2 列网格放 3 项时, 空出来的整格会露出容器底色。 */
+.start-options > label:last-child {
+  grid-column: 1 / -1;
 }
 
 .start-modes {
@@ -711,27 +730,63 @@ select:focus-visible {
 }
 
 .mode-card {
+  position: relative;
   display: grid;
   gap: 5px;
   min-height: 68px;
   padding: 11px 13px;
   border: 1px solid var(--line);
-  background: rgba(8, 20, 21, 0.86);
+  /* 双层: 上层是极淡的斜向细纹 (repeating-linear-gradient 零成本模拟绢帛织纹),
+     下层是深色底。纯 CSS 纹理由浏览器实时生成, 不占任何传输体积。 */
+  background:
+    repeating-linear-gradient(
+      58deg,
+      rgba(216, 202, 169, 0.035) 0px,
+      rgba(216, 202, 169, 0.035) 1px,
+      transparent 1px,
+      transparent 5px
+    ),
+    rgba(8, 20, 21, 0.86);
   color: rgba(234, 220, 187, 0.72);
   text-align: left;
   cursor: pointer;
-  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease,
+    box-shadow 160ms ease;
 }
 
 .mode-card:hover {
   border-color: rgba(210, 157, 75, 0.58);
   transform: translateY(-1px);
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.32);
 }
 
 .mode-card.is-active {
   border-color: rgba(220, 172, 82, 0.9);
-  background: linear-gradient(135deg, rgba(128, 46, 37, 0.38), rgba(17, 37, 37, 0.92));
+  background:
+    repeating-linear-gradient(
+      58deg,
+      rgba(232, 196, 132, 0.05) 0px,
+      rgba(232, 196, 132, 0.05) 1px,
+      transparent 1px,
+      transparent 5px
+    ),
+    linear-gradient(135deg, rgba(128, 46, 37, 0.38), rgba(17, 37, 37, 0.92));
   color: #f1dfb8;
+  box-shadow:
+    inset 0 1px 0 rgba(226, 184, 104, 0.22),
+    0 2px 10px rgba(0, 0, 0, 0.34);
+}
+
+/* 选中态左侧的朱砂标记条 */
+.mode-card.is-active::before {
+  content: "";
+  position: absolute;
+  left: -1px;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  background: linear-gradient(180deg, #e8a04c, #b83b35);
+  box-shadow: 0 0 8px rgba(220, 140, 60, 0.5);
 }
 
 .mode-card span {
@@ -944,13 +999,47 @@ select:focus-visible {
 
 .primary-button {
   color: #1c160c;
-  background: #d6a451;
   font-weight: 700;
+  /* 古铜金属: 竖向多段渐变模拟受光面, 内阴影压出厚度, 外发光让它从暗底浮起。
+     纯 CSS 方案的好处是零体积、任意 DPR 都清晰、色值可随主题调。 */
+  background:
+    linear-gradient(
+      180deg,
+      #f0cd85 0%,
+      #ddb05f 18%,
+      #c9954a 52%,
+      #b07f38 82%,
+      #96702f 100%
+    );
+  box-shadow:
+    inset 0 1px 0 rgba(255, 240, 205, 0.85),
+    inset 0 -1px 0 rgba(74, 48, 14, 0.55),
+    0 2px 10px rgba(198, 146, 60, 0.28);
+  text-shadow: 0 1px 0 rgba(255, 235, 190, 0.42);
 }
 
 .primary-button:hover {
-  background: #efc879;
+  background:
+    linear-gradient(
+      180deg,
+      #ffe0a0 0%,
+      #eec26f 18%,
+      #d9a557 52%,
+      #c08d40 82%,
+      #a67c33 100%
+    );
   transform: translateY(-1px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 246, 220, 0.95),
+    inset 0 -1px 0 rgba(74, 48, 14, 0.55),
+    0 4px 16px rgba(216, 162, 70, 0.42);
+}
+
+.primary-button:active {
+  transform: translateY(1px);
+  box-shadow:
+    inset 0 2px 5px rgba(58, 36, 8, 0.5),
+    inset 0 -1px 0 rgba(255, 235, 190, 0.22);
 }
 
 .continue-button {
