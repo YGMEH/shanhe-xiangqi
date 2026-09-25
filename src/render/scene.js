@@ -374,6 +374,7 @@ export class GameScene {
 
     this.terrain = createTerrain(this.materials, this.quality);
     this.scene.add(this.terrain);
+    this.attachCampChests();
 
     this.river = createRiver(this.materials);
     this.scene.add(this.river.group);
@@ -390,6 +391,22 @@ export class GameScene {
     this.pieceLayer = new THREE.Group();
     this.pieceLayer.name = "piece-layer";
     this.scene.add(this.pieceLayer);
+  }
+
+  async attachCampChests() {
+    const asset = await cloneModel("chest");
+    if (!asset) return;
+
+    const sourceBox = new THREE.Box3().setFromObject(asset.scene);
+    const scale = 0.58 / Math.max(sourceBox.getSize(new THREE.Vector3()).y, 0.001);
+    for (const [side, x, z] of [["red", -5.2, 13.4], ["black", 5.2, -13.4]]) {
+      const chest = asset.scene.clone(true);
+      chest.name = "camp-chest-" + side;
+      chest.scale.setScalar(scale);
+      chest.position.set(x, terrainHeightAt(x, z) - sourceBox.min.y * scale, z);
+      chest.rotation.y = side === "red" ? 0 : Math.PI;
+      this.terrain.add(chest);
+    }
   }
 
   bindEvents() {
@@ -481,12 +498,28 @@ export class GameScene {
       // 既不在场景也不在登记册: 这枚 actor 已经被替换, 不再管它。
       return;
     }
-    if (!model || !model.animations?.length) {
+    if (!model) {
       actor.buildSculpt();
       return;
     }
+    const { scene, animations = [] } = model;
+    // 静态 GLB 的放行策略。
+    //
+    // 原来只允许「古炮」这一种静态模型, 其他无动画资源一律退回程序化模型 ——
+    // 当时是为了避免误替换旧兵种。但用户后来给的一批高质量模型里, 战马、
+    // 战车、骑兵**都是无动画的静态网格**(各 500 万字节、约 1 万面,
+    // 远比程序化模型精细), 继续按老策略就会被全部挡在门外, 用户的感受就是
+    // 「我给的模型你一个都没接」。
+    //
+    // 现在改成: 静态模型一律放行, 由引擎给它套程序化待机/移动/攻击动作
+    // (见 pieces.js 的 staticExternalRoot 路径)。只有真正加载失败 (model 为
+    // null) 才退回程序化几何体。
+    //
+    // 保留 isStaticCannon 这个变量名是为了让古炮的特殊姿态逻辑不受影响。
+    const isStaticCannon = piece.type === PIECE_TYPES.CANNON && animations.length === 0;
+    void isStaticCannon;
+
     const fallback = actor.rig.model;
-    const { scene, animations } = model;
     scene.name = `external-${piece.id}`;
     scene.traverse((child) => {
       if (child.isMesh) {
@@ -505,33 +538,44 @@ export class GameScene {
     // 原始高度并不一致 —— 人形绑骨脚本归一到 4.30, 四足归一到 3.30,
     // 军师 2.35。同一张系数表乘上去, 结果就是战象比人还矮、军师比老兵高一截。
     // 改成按目标高度反推后, 任何新模型替换进来都会自动落在正确尺寸上。
+    // 统一按实际 GLB 包围盒缩放到棋子体态高度。用户模型的原始尺寸
+    // 并不统一：有些资源归一到 1.0，有些带骨骼的资源是另一套单位。
+    // 直接读取克隆后的绑定姿态盒子，避免用错误的固定 rawHeight 把模型压缩或放大。
     const targetHeight = {
-      [PIECE_TYPES.ELEPHANT]: 3.85,
-      [PIECE_TYPES.CHARIOT]: 3.05,
-      [PIECE_TYPES.HORSE]: 3.15,
-      [PIECE_TYPES.GENERAL]: 2.95,
-      [PIECE_TYPES.ADVISOR]: 2.80,
-      [PIECE_TYPES.SOLDIER]: 2.62,
-      [PIECE_TYPES.CANNON]: 1.85,
+      [PIECE_TYPES.ELEPHANT]: 2.55,
+      [PIECE_TYPES.CHARIOT]: 2.05,
+      [PIECE_TYPES.HORSE]: 2.35,
+      [PIECE_TYPES.GENERAL]: 2.45,
+      [PIECE_TYPES.ADVISOR]: 2.25,
+      [PIECE_TYPES.SOLDIER]: 2.15,
+      [PIECE_TYPES.CANNON]: 1.55,
     };
-    // 各模型绑骨后的原始高度(世界单位), 用来换算缩放
-    const rawHeight = {
-      [PIECE_TYPES.ELEPHANT]: 3.30,
-      [PIECE_TYPES.CHARIOT]: 3.30,
-      [PIECE_TYPES.HORSE]: 3.30,
-      [PIECE_TYPES.GENERAL]: 3.30,
-      [PIECE_TYPES.ADVISOR]: 2.35,
-      [PIECE_TYPES.SOLDIER]: 3.30,
-      [PIECE_TYPES.CANNON]: 1.75,
-    };
-    const target = targetHeight[piece.type] ?? 3.0;
-    const raw = rawHeight[piece.type] ?? 3.3;
+    const sourceBox = new THREE.Box3().setFromObject(scene);
+    const sourceSize = sourceBox.getSize(new THREE.Vector3());
+    const raw = Math.max(sourceSize.y, 0.001);
+    const target = targetHeight[piece.type] ?? 2.2;
     scene.scale.setScalar(target / raw);
-
-    actor.group.add(scene);
+    // 静态蒙皮资源没有 AnimationMixer，但仍然有骨骼绑定。
+    // 只把它放进外层根节点做整体位移，绝不修改其骨骼或程序化马腿姿态。
+    const isStaticSkinnedModel = !animations.length && scene.getObjectByProperty("isSkinnedMesh", true);
+    const staticExternalRoot = animations.length ? null : new THREE.Group();
+    if (staticExternalRoot) {
+      staticExternalRoot.name = `static-motion-${piece.id}`;
+      staticExternalRoot.userData.staticSkinnedModel = isStaticSkinnedModel;
+      actor.group.add(staticExternalRoot);
+      staticExternalRoot.add(scene);
+    } else {
+      actor.group.add(scene);
+    }
     if (fallback) fallback.parent?.remove(fallback);
     actor.externalModel = scene;
-
+    actor.staticExternalModel = animations.length ? null : scene;
+    actor.staticExternalRoot = staticExternalRoot;
+    if (!animations.length && piece.type === PIECE_TYPES.CANNON) {
+      // 这门炮没有骨骼: 外层根节点负责待机、俯仰和后坐。
+      // 模型本体仍保留独立落地偏移, 不会因动画重置而悬空。
+      actor.rig.model = staticExternalRoot;
+    }
     // 落地校正: 把模型的最低点抬到刚好贴住地面。
     // 绑骨脚本的"底面贴地"是骨骼绑定之前做的, 蒙皮权重建立后顶点位置
     // 会随骨骼初始姿态偏移, 再加上棋子本身还有一个地形高度补偿,
@@ -551,8 +595,39 @@ export class GameScene {
         const action = mixer.clipAction(clip);
         byName.set(clip.name, action);
       });
-      const find = (...names) => {
-        for (const name of names) {
+      // 剪辑名映射表: 把各家模型五花八门的动作名归一到本引擎的四个槽位。
+      //
+      // 为什么必须有这张表: 以前的 find() 只认 'idle'/'move'/'attack'/'defeat'
+      // 这几个字面量, 而外部模型给的动作名是 Mixamo / Tripo 风格 ——
+      //   greet_01.001 / dance_05.001 / walk.001 / depressed.001 / box_02.001
+      // 一个都匹配不上, find() 静默返回 null, 于是棋子加载成功却卡在绑定姿势
+      // 一动不动。用户看到的就是「模型接进去了但像块木头」。
+      //
+      // 匹配顺序有意义: 先匹配更具体的语义, 再退到宽泛的。
+      // 例如 samurai 同时有 'angry_01' 和 'box_02', 我们更希望用 'box_02'
+      // (出拳) 当作 attack, 而不是用 'angry_01'(生气)。
+      const CLIP_ALIASES = {
+        idle: [
+          "idle", "待机", "breathing", "breath", "stand", "loop",
+          "greet", "bow", "cheer", "hug", "heart", "complaint",
+        ],
+        move: [
+          "move", "walk", "run", "移动", "行走", "preset:quadruped:walk",
+          "quadruped", "trot", "gallop",
+        ],
+        attack: [
+          "attack", "击杀", "攻击", "box", "punch", "chop", "slash",
+          "kick", "dig", "swing", "hit",
+        ],
+        defeat: [
+          "defeat", "death", "deaths", "阵亡", "die", "dead", "afraid",
+          "depressed", "frustrated", "fall",
+        ],
+      };
+
+      const find = (slot) => {
+        const aliases = CLIP_ALIASES[slot] ?? [slot];
+        for (const name of aliases) {
           const exact = byName.get(name);
           if (exact) return exact;
           const insensitive = [...byName.entries()].find(([key]) =>
@@ -562,10 +637,26 @@ export class GameScene {
         }
         return null;
       };
-      const idle = find("idle", "待机");
-      const move = find("move", "walk", "移动");
-      const attack = find("attack", "击杀", "攻击");
-      const defeat = find("defeat", "death", "阵亡");
+      const idle = find("idle");
+      const move = find("move");
+      const attack = find("attack");
+      const defeat = find("defeat");
+
+      // 兜底: 四个槽位全空但模型确实带了动画 —— 与其让棋子站着不动,
+      // 不如把第一段剪辑当待机循环播起来, 至少证明动画链路是通的。
+      // (tripo 系列模型的动作名是完全自定义的, 有可能一个别名都命中不了。)
+      if (!idle && !move && !attack && !defeat && animations.length) {
+        const first = mixer.clipAction(animations[0]);
+        actor.actions = { idle: first, move: null, attack: null, defeat: null };
+        actor.mixer = mixer;
+        first.setLoop(THREE.LoopRepeat, Infinity);
+        first.play();
+        actor.currentAction = first;
+        actor.clipFallbackName = animations[0].name;
+        this.flattenBase(actor);
+        return;
+      }
+
       actor.mixer = mixer;
       actor.actions = { idle, move, attack, defeat };
       if (actor.currentAction && actor.currentAction !== idle) {

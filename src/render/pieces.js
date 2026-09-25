@@ -37,6 +37,7 @@ export class PieceActor {
     this.group.userData.pieceId = piece.id;
     this.group.userData.actor = this;
     this.rig = {};
+    this.staticExternalModel = null;
     this.phase = Math.random() * Math.PI * 2;
     this.attackAt = -1;
     this.attackType = null;
@@ -721,16 +722,29 @@ export class PieceActor {
       this.rig.glow.scale.setScalar(pulse);
       this.rig.glow.rotation.z = time * 0.5 * this.feedbackScale;
     }
-    if (this.rig.model && this.feedbackScale > 0.001) {
+    if (this.rig.model && this.feedbackScale > 0.001 && !this.staticExternalModel) {
       this.rig.model.position.y += this.feedbackScale * 0.07;
     }
 
     const t = time + this.phase;
     const motionScale = reducedMotion ? 0.16 : 1;
+    if (this.staticExternalRoot) {
+      // Static skinned models must remain in bind pose.
+      if (!this.staticExternalRoot.userData.staticSkinnedModel) {
+        this.staticExternalRoot.position.y = Math.sin(t * 1.8 + this.phase) * 0.006 * motionScale;
+        this.staticExternalRoot.position.z = 0;
+        this.staticExternalRoot.rotation.x = 0;
+        this.staticExternalRoot.rotation.z = Math.sin(t * 1.1 + this.phase) * 0.006 * motionScale;
+      } else {
+        this.staticExternalRoot.position.set(0, 0, 0);
+        this.staticExternalRoot.rotation.set(0, 0, 0);
+      }
+    }
+
     const idle = Math.sin(t * 1.8);
     const breath = Math.sin(t * 2.15);
 
-    if (this.rig.model) {
+    if (this.rig.model && !this.staticExternalModel) {
       this.rig.model.position.y = 0.25 + idle * 0.012 * motionScale;
       this.rig.model.rotation.z = Math.sin(t * 1.1) * 0.008 * motionScale;
     }
@@ -855,7 +869,7 @@ export class PieceActor {
       case PIECE_TYPES.SOLDIER:
         if (this.rig.armR) this.rig.armR.rotation.x = -1.45 * lunge * motionScale;
         if (this.rig.spear) this.rig.spear.rotation.x = -0.35 * lunge * motionScale;
-        if (this.rig.model) {
+        if (this.rig.model && !this.staticExternalModel) {
           this.rig.model.position.z = 0.4 * lunge * motionScale;
           this.rig.model.rotation.x = -0.08 * lunge * motionScale;
         }

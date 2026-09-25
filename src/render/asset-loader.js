@@ -12,20 +12,37 @@ loader.setMeshoptDecoder(MeshoptDecoder);
 const cache = new Map();
 
 export const MODEL_MANIFEST = Object.freeze({
-  soldier: "assets/models/generated/soldier.glb",
-  "soldier-black": "assets/models/generated/soldier-black.glb",
-  general: "assets/models/generated/general.glb",
-  "general-black": "assets/models/generated/general-black.glb",
+  // ── 用户提供的高精度模型 ──────────────────────────────────────────
+  //
+  // 这批模型来自用户, 每个约 500~640 万字节 / 约 1 万面, 是现有程序化模型的
+  // 数倍精度。接法说明:
+  //
+  // · horse / soldier / chariot / cannon: 当前使用无动画静态网格,
+  //   现在 scene.js 已放行静态模型, 由 pieces.js 的 staticExternalRoot 路径
+  //   提供程序化待机与位移姿态。
+  // · warrior-rigged (67 关节 / 5 段动画) 与 samurai-rigged (67 关节 / 8 段)
+  //   是带骨骼的, 走 mixer 路线; 它们的动作名是 Mixamo 风格, 由 scene.js 的
+  //   CLIP_ALIASES 归一化。
+  // · general-rigged 仅保留供检视; 缺少行走和攻击动作, 不替换在用的将军。
+  //
+  // 黑方暂时复用同一批模型: 用户给的是单套模型, 没有分色版本。分色靠
+  // factionMaterials / 皮肤系统在材质层处理, 而不是靠两套几何体。
+  elephant: "assets/models/generated/elephant-armored.glb",
+  "elephant-black": "assets/models/generated/elephant-armored.glb",
+  horse: "assets/models/generated/mounted-warrior.glb",
+  "horse-black": "assets/models/generated/mounted-warrior.glb",
+  soldier: "assets/models/generated/soldier-medieval.glb",
+  "soldier-black": "assets/models/generated/soldier-medieval.glb",
+  chariot: "assets/models/generated/chariot-ancient.glb",
+  "chariot-black": "assets/models/generated/chariot-ancient.glb",
+  cannon: "assets/models/generated/cannon-antique.glb",
+  "cannon-black": "assets/models/generated/cannon-antique.glb",
+  advisor: "assets/models/generated/warrior-rigged.glb",
+  "advisor-black": "assets/models/generated/warrior-rigged.glb",
+  general: "assets/models/generated/samurai-rigged.glb",
+  "general-black": "assets/models/generated/samurai-rigged.glb",
   "general-rigged": "assets/models/generated/general-rigged.glb",
-  advisor: "assets/models/generated/advisor.glb",
-  elephant: "assets/models/generated/elephant.glb",
-  "elephant-black": "assets/models/generated/elephant-black.glb",
-  horse: "assets/models/generated/horse.glb",
-  "horse-black": "assets/models/generated/horse-black.glb",
-  chariot: "assets/models/generated/chariot.glb",
-  "chariot-black": "assets/models/generated/chariot-black.glb",
-  cannon: "assets/models/generated/cannon.glb",
-  "cannon-black": "assets/models/generated/cannon-black.glb",
+  chest: "assets/models/generated/treasure-chest.glb",
 });
 
 export function loadModel(key) {

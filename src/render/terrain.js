@@ -326,7 +326,7 @@ export function createRiver(materials) {
     displaceGeometry(boulder.geometry, 0.07, i, 2.1);
     boulder.position.set(
       (Math.random() - 0.5) * 23.5,
-      -0.42 + Math.random() * 0.14,
+      -0.24 + Math.random() * 0.30,
       (Math.random() - 0.5) * 2.5
     );
     boulder.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
@@ -356,8 +356,7 @@ export function createRiver(materials) {
     strip.rotation.x = -Math.PI / 2;
     strip.rotation.z = (Math.random() - 0.5) * 0.34;
     strip.position.set(
-      (Math.random() - 0.5) * 23.5,
-      -0.315 + Math.random() * 0.04,
+      -0.012 + Math.random() * 0.030,
       (Math.random() - 0.5) * 2.5
     );
     strip.scale.x = 0.5 + Math.random() * 1.4;
@@ -379,12 +378,23 @@ export function updateRiver(river, time) {
     const index = i * 3;
     const x = base[index];
     const z = base[index + 2];
-    const flow = x * 0.62 + time * 1.35;
+    // 水流方向: 河水沿河道自西向东 (x 轴) 流, 所以波峰必须沿 x 推进。
+    //
+    // 原来的写法 flow = x * 0.62 + time * 1.35 看似在动, 实际是**横向驻波**:
+    // 波沿着河的宽度(z)方向来回摆, 玩家从默认视角看过去只觉得水面轻微抽搐,
+    // 完全没有「水在流」的读数 —— 用户的反馈「没有河水流动」就是这么来的。
+    //
+    // 正确做法是让相位沿 x 前进而不沿 z 变: 把 x 的系数调大并让时间项与它
+    // 同号, 再叠两个频率不同的同向波, 形成不断向下游推移的波列。
+    const flowA = x * 1.15 - time * 1.55;
+    const flowB = x * 2.35 - time * 2.4 + z * 0.55;
+    const cross = Math.sin(z * 1.9 - time * 0.8) * 0.012; // 极轻的横向晃动
     const y =
-      Math.sin(flow) * 0.042 +
-      Math.sin(flow * 2.3 + z * 1.4) * 0.016 +
-      Math.sin(z * 2.2 - time * 1.9) * 0.02;
-    position.setY(i, y - 0.34);
+      Math.sin(flowA) * 0.028 +
+      Math.sin(flowB) * 0.012 +
+      cross;
+    position.setY(i, y);
+
   }
   position.needsUpdate = true;
   if (shouldRecomputeNormals) {
@@ -393,11 +403,14 @@ export function updateRiver(river, time) {
   }
 
   river.foam.children.forEach((strip, index) => {
-    strip.position.x += strip.userData.speed * 0.03;
+    // 泡沫也要顺着同一方向漂: 原来 x 每帧只加 speed*0.03, 而水面波速是
+    // 1.55 单位/秒, 泡沫慢了一个量级, 看起来像钉在水面上的白条。
+    strip.position.x -= strip.userData.speed * 0.055;
     strip.position.z += Math.sin(time * 0.9 + strip.userData.wobble) * 0.0016;
     strip.rotation.z += Math.sin(time * 1.4 + index) * 0.002;
-    if (strip.position.x > 12.4) strip.position.x = -12.4;
+    if (strip.position.x < -12.4) strip.position.x = 12.4;
     strip.material.opacity = 0.12 + Math.sin(time * 1.3 + index) * 0.05;
+
   });
 }
 
@@ -536,6 +549,63 @@ export function createBridges(materials) {
       });
     });
 
+    // 桥墩: 落到河床的实体支撑。
+    //
+    // 为什么必须有: 拱券用 TorusGeometry(0.62, 0.2) 摆在局部 y=-0.3, 乘以
+    // scale.y=0.9 之后最低点约在 -0.46; 而河床 bed 摆在 y=-0.72。两者之间
+    // 那 0.26 米的空隙没有任何几何体, 于是整座桥看起来是**悬空**的 —— 这正
+    // 是玩家反馈「桥没有必要」时那种一眼假的感觉来源之一。
+    //
+    // 做法: 在两端拱脚正下方各补一根方形石墩, 从拱脚一直插到河床以下。
+    // 墩子比拱券略粗, 底端埋进河床 0.1, 这样无论从哪个角度看都不会露缝。
+    const PIER_TOP = -0.34; // 拱脚附近, 略高于拱券最低点
+    const PIER_BOTTOM = -0.82; // 河床 -0.72 以下 0.1
+    const pierHeight = PIER_TOP - PIER_BOTTOM;
+    [-1, 1].forEach((sideZ) => {
+      [-1, 1].forEach((sideX) => {
+        const pier = new THREE.Mesh(
+          new THREE.BoxGeometry(0.62, pierHeight, 0.66, 1, 1, 1),
+          materials.stoneDark
+        );
+        pier.position.set(
+          sideX * (bridgeWidth * 0.5 - 0.22),
+          (PIER_TOP + PIER_BOTTOM) * 0.5,
+          sideZ * 0.72
+        );
+        pier.castShadow = true;
+        pier.receiveShadow = true;
+        bridge.add(pier);
+
+        // 墩基: 比墩身再外扩一圈的方形基座, 埋在河床里,
+        // 让墩子看起来是「坐」在河床上而不是「插」进去。
+        const footing = new THREE.Mesh(
+          new THREE.BoxGeometry(0.78, 0.18, 0.82, 1, 1, 1),
+          materials.stone
+        );
+        footing.position.set(
+          sideX * (bridgeWidth * 0.5 - 0.22),
+          PIER_BOTTOM + 0.04,
+          sideZ * 0.72
+        );
+        footing.receiveShadow = true;
+        bridge.add(footing);
+      });
+    });
+
+    // 桥台: 桥面两端与河岸相接处的挡土墙, 把桥面与地面之间那道缝填上。
+    // 原来桥面第一块板就在 y≈0.12 而地面在 ~0.26, 桥面反而低于地面, 视觉上
+    // 像被埋进土里; 补一对桥台后, 桥面与岸顶之间有了明确的连接体。
+    [-1, 1].forEach((sideZ) => {
+      const abutment = new THREE.Mesh(
+        new THREE.BoxGeometry(bridgeWidth + 0.3, 0.66, 0.5, 1, 1, 1),
+        materials.stoneDark
+      );
+      abutment.position.set(0, 0.02, sideZ * (bridgeSpan * 0.5 - 0.12));
+      abutment.castShadow = true;
+      abutment.receiveShadow = true;
+      bridge.add(abutment);
+    });
+
     group.add(bridge);
   });
 
@@ -646,6 +716,36 @@ export function createDistantRidges(materials, quality = "high") {
           layer.depth * (0.5 + hash2d(i * 3 + p, 88) * 0.34)
         );
         stack.add(peak);
+
+        // 山脚封裙: 锥体底面原本是敞开的, 而 displaceRidgeGeometry 又把底环
+        // 顶点随机推歪, 于是山体与地面之间留出参差的缝隙 —— 玩家看到的
+        // 「山脉模型的底部没有贴着地面」就是这个缝隙。
+        //
+        // 封裙做法: 沿着锥体底面半径补一圈向上的筒壁, 把最下面一段坐标
+        // 直接压到比 ground skirt 更低的位置。这样即使底面被推歪, 也有
+        // 一段实体埋进地面以下, 视觉上就是「山从地里长出来」。
+        const skirtSegments = layer.radial;
+        const skirtGeometry = new THREE.CylinderGeometry(
+          peakRadius * 0.98,
+          peakRadius * 1.06,
+          peakHeight * 0.34,
+          skirtSegments,
+          1,
+          true // openEnded: 不需要顶底盖, 只补侧壁
+        );
+        const skirt = new THREE.Mesh(skirtGeometry, material);
+        skirt.position.set(
+          peak.position.x,
+          -peakHeight * 0.5 + peakHeight * 0.17,
+          peak.position.z
+        );
+        skirt.scale.set(
+          peak.scale.x,
+          1,
+          peak.scale.z
+        );
+        skirt.rotation.y = peak.rotation.y;
+        stack.add(skirt);
       }
 
       stack.position.set(
