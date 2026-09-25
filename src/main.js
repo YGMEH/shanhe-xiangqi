@@ -56,6 +56,9 @@ async function boot() {
       ui,
       screenPositionForSquare: (x, y) => scene.screenPositionForSquare(x, y),
       boardState: () => scene.boardStateForDebug(),
+      // 音频运行时: 验证 BGM/音效加载时不需要再翻内部字段
+      audio,
+      audioBgmErrors: () => Object.fromEntries(audio.bgmErrors),
     };
 
     bindInterface();
@@ -90,6 +93,8 @@ function startGame() {
     return;
   }
   audio.unlock();
+  // 对局开始: 请求山河对弈主题, 素材就绪后由 unlock 链路接管
+  audio.bgmRequested = "battle";
   const playerSide = ui.elements.sideSelect.value;
   const difficulty = Number(ui.elements.difficultySelect.value);
   saveSettings(ui.elements, manualMode, muted);

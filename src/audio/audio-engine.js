@@ -8,6 +8,12 @@ export class AudioEngine {
     this.samples = new Map();
     this.samplesReady = false;
     this.sampleLoadPromise = null;
+    this.bgm = new Map();
+    this.bgmLoadPromise = null;
+    this.bgmSource = null;
+    this.bgmGain = null;
+    this.bgmKey = null;
+    this.bgmErrors = new Map();
   }
 
   async loadSamples() {
@@ -74,7 +80,14 @@ export class AudioEngine {
     if (!this.samplesReady) void this.loadSamples();
     if (!this.ambientStarted) this.startAmbient();
     if (!this.musicStarted) this.startMusic();
+    // BGM 素材较大, 单独异步加载; 就绪后由 switchBgm 接管
+    if (!this.bgmLoadPromise) {
+      void this.loadBgm().then(() => {
+        if (this.bgmRequested && !this.bgmKey) this.switchBgm(this.bgmRequested);
+      });
+    }
   }
+
 
   setMuted(muted) {
     this.muted = muted;
@@ -445,6 +458,7 @@ export class AudioEngine {
   }
 
   check() {
+    this.switchBgm("check");
     if (this.playSample("metal-latch-1", { volume: 0.18, rate: 0.72 })) return;
     [0, 0.12, 0.24].forEach((offset, index) => {
       window.setTimeout(() => {
@@ -459,6 +473,7 @@ export class AudioEngine {
   }
 
   victory() {
+    this.switchBgm("victory");
     this.playSample("handle-coins-2", { volume: 0.08, rate: 0.72 });
     [261.63, 329.63, 392, 523.25].forEach((frequency, index) => {
       window.setTimeout(() => {
@@ -474,6 +489,7 @@ export class AudioEngine {
   }
 
   defeat() {
+    this.switchBgm("defeat");
     this.playSample("cloth-1", { volume: 0.08, rate: 0.72 });
     [220, 185, 146.83].forEach((frequency, index) => {
       window.setTimeout(() => {
@@ -610,6 +626,92 @@ export class AudioEngine {
     this.musicIntensity = Math.max(0, Math.min(1, value));
   }
 
+  /**
+   * 预加载 BGM 素材。与音效分离: 单曲 3~4 MB, 不能在 unlock() 的
+   * 关键路径上阻塞音效加载, 因此由调用方显式触发并忽略失败。
+   */
+  loadBgm() {
+    if (this.bgmLoadPromise) return this.bgmLoadPromise;
+    this.bgmLoadPromise = Promise.all(
+      Object.entries(BGM_LIBRARY).map(async ([key, url]) => {
+        try {
+          const response = await fetch(url);
+          if (!response.ok) return;
+          const bytes = await response.arrayBuffer();
+          const buffer = await this.context.decodeAudioData(bytes);
+          this.bgm.set(key, buffer);
+        } catch (error) {
+          // 素材缺失或解码失败时保留程序化合成 fallback, 不能哑。
+          // 但要把原因记下来 —— 静默 catch 会让"BGM 没响"变成一个无法排查的现象。
+          this.bgmErrors.set(key, String((error && error.message) || error));
+        }
+      })
+    ).then(() => this.bgm);
+    return this.bgmLoadPromise;
+  }
+
+  /**
+   * 切换到指定 BGM。素材尚未就绪时静默地回退到现有程序化音乐。
+   * 同名曲目重复调用不会重启, 避免每次吃子都把曲子拉回开头。
+   */
+  switchBgm(key) {
+    if (!this.context || this.muted) return false;
+    if (this.bgmKey === key && this.bgmSource) return true;
+
+    const buffer = this.bgm.get(key);
+    if (!buffer) {
+      // fallback: 没有素材就走原来的实时合成
+      if (!this.musicStarted) this.startMusic();
+      return false;
+    }
+
+    this.stopBgm();
+    // 程序化音乐只作为 fallback, 有素材时必须让位
+    this.stopMusic();
+
+    const source = this.context.createBufferSource();
+    const gain = this.context.createGain();
+    source.buffer = buffer;
+    source.loop = true;
+    gain.gain.value = 0;
+    gain.connect(this.master);
+    source.connect(gain);
+    // 淡入交给代码, 素材本身不应带头部静音
+    gain.gain.setTargetAtTime(0.16, this.context.currentTime, 1.2);
+    source.start(0);
+
+    this.bgmSource = source;
+    this.bgmGain = gain;
+    this.bgmKey = key;
+    return true;
+  }
+
+  /** 停止当前 BGM 并淡出。 */
+  stopBgm(fadeSeconds = 1.5) {
+    if (!this.bgmSource) return;
+    const source = this.bgmSource;
+    const gain = this.bgmGain;
+    this.bgmSource = null;
+    this.bgmGain = null;
+    this.bgmKey = null;
+    try {
+      gain.gain.setTargetAtTime(0, this.context.currentTime, fadeSeconds / 3);
+      source.stop(this.context.currentTime + fadeSeconds);
+    } catch {
+      // Source may already have stopped.
+    }
+  }
+
+  /** 停止程序化音乐(有 BGM 素材时让位, 或对局结束时静场)。 */
+  stopMusic() {
+    this.musicStarted = false;
+    window.clearTimeout(this.musicTimer);
+    window.clearTimeout(this.drumTimer);
+    if (this.musicGain) {
+      this.musicGain.gain.setTargetAtTime(0, this.context.currentTime, 0.6);
+    }
+  }
+
   dispose() {
     this.musicStarted = false;
     window.clearTimeout(this.musicTimer);
@@ -649,4 +751,19 @@ const SAMPLE_LIBRARY = Object.freeze({
   "metal-click-1": "assets/audio/kenney-rpg/metalClick.ogg",
   "metal-latch-1": "assets/audio/kenney-rpg/metalLatch.ogg",
   "metal-pot-heavy-1": "assets/audio/kenney-rpg/metalPot1.ogg",
+});
+
+/**
+ * 背景音乐库。素材来自用户在会话中提供的四个 MP3 附件:
+ *   cold_earth_heavy_sky.mp3     -> bgm_battle  (山河对弈)
+ *   before_the_first_arrow.mp3   -> bgm_check   (将军危局)
+ *   weight_of_the_iron_sky.mp3   -> bgm_victory (惨胜收阵)
+ *   where_the_banners_fell.mp3   -> bgm_defeat  (败局余烬)
+ * 规格见 docs/AUDIO_BRIEF.md。素材缺失时保留程序化合成作为 fallback。
+ */
+const BGM_LIBRARY = Object.freeze({
+  battle: "assets/audio/bgm/bgm_battle.mp3",
+  check: "assets/audio/bgm/bgm_check.mp3",
+  victory: "assets/audio/bgm/bgm_victory.mp3",
+  defeat: "assets/audio/bgm/bgm_defeat.mp3",
 });

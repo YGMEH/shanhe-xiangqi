@@ -69,16 +69,29 @@ three.js `FileLoader` 使用 XMLHttpRequest，不是 `fetch`。检查资源请�
 
 映射表在 `src/audio/audio-engine.js:618` 的 `SAMPLE_LIBRARY`。已随构建进入 `dist/assets/audio/`。
 
-**BGM：尚未生成，是待交付项，不是丢失资产。**
+**BGM：已交付并接线完成（2026-09-25）。**
 
-项目里**没有任何背景音乐文件**，`public/assets/audio/bgm/` 目录也还不存在。当前对局音乐是 `src/audio/audio-engine.js:510` `startMusic()` 用 Web Audio 实时合成的：古筝式拨弦（五声音阶宫商角徵羽，随机游走）+ 每 2.4s 一记低音鼓 + 82.41/123.47Hz drone + 带通噪声风声。
+用户在会话中提供了四个 MP3 附件，已按 `docs/AUDIO_BRIEF.md` 的曲目清单落到 `public/assets/audio/bgm/`：
 
-强度跟随战况：`src/game/controller.js:367` 每次吃子 `setMusicIntensity(0.6 + eaten * 0.045)`，`controller.js:449` 将军时拉到 `1`；强度影响旋律间隔与是否打鼓。
+| 文件 | 用途 | 原始素材名 |
+| --- | --- | --- |
+| `bgm_battle.mp3` (3.70 MB) | 山河对弈（对局默认） | `cold_earth_heavy_sky.mp3` |
+| `bgm_check.mp3` (3.85 MB) | 将军危局 | `before_the_first_arrow.mp3` |
+| `bgm_victory.mp3` (3.60 MB) | 惨胜收阵 | `weight_of_the_iron_sky.mp3` |
+| `bgm_defeat.mp3` (3.46 MB) | 败局余烬 | `where_the_banners_fell.mp3` |
 
-需生成的 4–5 首曲目、风格定位、逐曲要求、技术规格（.ogg / 44.1kHz / 峰值 ≤ -6 dBFS / 无缝 loop / 禁止头部静音）与接线步骤，**已完整写在 `docs/AUDIO_BRIEF.md`**（用户在更早的会话中明确表示"我去给你生成"，等的是这份清单）。
+接线落点：
 
-接线计划（`docs/AUDIO_BRIEF.md` 第六节）：拿到素材后新增 `BGM_LIBRARY` 与 `startBgm()/switchBgm()`，复用 `loadSamples()` 的 `decodeAudioData` 路径，`controller.js` 的 `check()`/`victory()`/`defeat()` 三处改为切曲，**程序化合成保留为素材缺失时的 fallback**。
+- `src/audio/audio-engine.js` — 新增 `BGM_LIBRARY`（含素材来源注释）、`loadBgm()`、`switchBgm(key)`、`stopBgm(fadeSeconds = 1.5)`；构造函数新增 `bgm`/`bgmLoadPromise`/`bgmSource`/`bgmGain`/`bgmKey`/`bgmErrors` 六个字段。`switchBgm()` 用 `AudioBufferSourceNode` + `loop = true`，经独立 gain 节点淡入（`setTargetAtTime(0.16, now, 1.2)`），并**先 `stopBgm()` 再把程序化 `stopMusic()`**，素材存在时合成器必须让位。
+- `src/main.js` — `startGame()` 里 `audio.unlock()` 之后设 `audio.bgmRequested = "battle"`；`__SHANHE_DEBUG__` 新增 `audio` 与 `audioBgmErrors()`，便于以后直接查音频运行时而不必翻内部字段。
+- `src/game/controller.js` — 三个调用点改为切曲：`check()` → `switchBgm("check")`、`victory()` → `switchBgm("victory")`、`defeat()` → `switchBgm("defeat")`（`switchBgm` 内部先 `stopBgm()`，因此对局结束时 `bgm_battle` 自动淡出）。
+- **程序化合成完整保留为 fallback**：素材缺失或解码失败时 `switchBgm()` 返回 `false` 并回落到 `startMusic()`，不会哑。
 
+验证方式：`py -3 tmp\verify_bgm.py --url http://127.0.0.1:4302/ --wait 16`。三个判据缺一不可 —— 网络层（四个 mp3 均 200）、解码层（`audio.bgm` 出现四键）、播放层（`bgmKey === "battle"`、`bgmSource` 非空、`context.state === "running"`）。**已知时序陷阱：3.6 MB 的 MP3 解码明显慢于音效，取样早于约 15 秒会看到空的 `bgm` Map，不代表接线失败。**
+
+排查记录：过程中一度出现 `bgmKeys: []`，真因是解码未完成而非代码错误；同时把原先的静默 `catch {}` 改为记录到 `bgmErrors`，避免"BGM 没响"变成无法排查的现象。
+
+**占位素材：当前四首是用户提供的 MP3；`docs/AUDIO_BRIEF.md` 的技术规格要求 `.ogg` Vorbis / 峰值 ≤ -6 dBFS / 整体 ≈ -20 LUFS / 首尾无缝，如后续拿到符合规格的版本直接覆盖同名文件即可，代码无需改动。**
 ## 保护性约束
 - 不删除任何用户模型、截图、报告或 `work/tmp` 产物。
 - 修改源码后先 `node --check`，再重启 `tmp/live-preview.mjs`。
@@ -101,4 +114,6 @@ node --check src\render\scene.js
 node --check src\render\pieces.js
 npm.cmd test
 npm.cmd run check:public
+npm.cmd run check:public
+py -3 tmp\verify_bgm.py --url http://127.0.0.1:4302/ --wait 16
 ```
